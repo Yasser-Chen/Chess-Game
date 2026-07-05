@@ -152,3 +152,8 @@ Queen.prototype.recalculateAttackingSquares = function (board) {
     }
   }
 };
+
+// CommonJS export for Node.js testing
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = Queen;
+}

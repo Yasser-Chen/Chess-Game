@@ -29,3 +29,8 @@ Piece.prototype.isLegal = function (board, x, y) {
   }
   return true;
 };
+
+// CommonJS export for Node.js testing
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = Piece;
+}

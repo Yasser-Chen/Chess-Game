@@ -1,0 +1,32 @@
+{
+  "name": "chess-game",
+  "version": "1.0.0",
+  "description": "This project implements all standard chess moves, rules, and basic checks. It features online 1v1 gameplay (open the application in two tabs to play against another person), local 1v1 on the same device, and player vs. bot modes.",
+  "main": "index.js",
+  "scripts": {
+    "test": "jest --forceExit --detectOpenHandles"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Yasser-Chen/Chess-Game.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Yasser-Chen/Chess-Game/issues"
+  },
+  "homepage": "https://github.com/Yasser-Chen/Chess-Game#readme",
+  "jest": {
+    "testEnvironment": "node",
+    "setupFiles": [
+      "<rootDir>/tests/setup.js"
+    ]
+  },
+  "devDependencies": {
+    "jest": "^30.4.2",
+    "jest-environment-jsdom": "^30.4.1",
+    "jsdom": "^24.1.0"
+  }
+}
