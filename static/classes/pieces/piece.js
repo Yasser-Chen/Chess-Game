@@ -2,6 +2,7 @@ function Piece(x, y, color) {
   this.x = x;
   this.y = y;
   this.color = color;
+  this.firstMoveDone = false;
   this.attackingSquares = [];
   this.attackingSquares.exists = comparingObjs;
   this.attackingSquares.pushItem = pushItem;
