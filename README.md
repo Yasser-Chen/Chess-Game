@@ -12,7 +12,7 @@ This project implements all standard chess moves, rules, and basic checks. It fe
 - [Make the board responsive for different screen sizes](https://github.com/Yasser-Chen/chessGame/issues/6).
 - [Develop an AI opponent that makes optimal moves using deep learning techniques](https://github.com/Yasser-Chen/chessGame/issues/7).
 - [Fix the bug that occurs after castling](https://github.com/Yasser-Chen/chessGame/issues/8).
-
+- [Add resigne functionality](https://github.com/Yasser-Chen/Chess-Game/issues/9).
 ### Running the Project:
 
 1.  Install the required dependencies:
