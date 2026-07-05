@@ -651,35 +651,51 @@ Board.prototype.moveTo = function (piece, square) {
     piece.constructor.name == "King" &&
     oldPiece.constructor.name == "Rook"
   ) {
-    if (oldPiece.y == 8) {
+    let rookWasOnHFile = oldPiece.y == 8;
+    
+    if (rookWasOnHFile) {
+      // Short castling
       piece.y = 7;
       oldPiece.y = 6;
     } else {
+      // Long castling
       piece.y = 3;
       oldPiece.y = 4;
     }
-    let king = $(piece.element).detach();
-    king.draggable({
+    
+    piece.firstMoveDone = true;
+    oldPiece.firstMoveDone = true;
+    
+    let kingEl = $(piece.element).detach();
+    kingEl.css({
+      top: "0px",
+      left: "0px",
+    });
+    kingEl.draggable({
       drag: onPieceDrag,
       accept: "td",
       containment: "#game",
       stop: onPieceStopDrag,
       scroll: false,
     });
-    piece.element = king;
-
-    let rook = $(oldPiece.element).detach();
-    rook.draggable({
+    piece.element = kingEl[0];
+    
+    let rookEl = $(oldPiece.element).detach();
+    rookEl.css({
+      top: "0px",
+      left: "0px",
+    });
+    rookEl.draggable({
       drag: onPieceDrag,
       accept: "td",
       containment: "#game",
       stop: onPieceStopDrag,
       scroll: false,
     });
-    piece.element = rook;
-
-    $(`td[x=${piece.x}][y=${piece.y}]`).append(king);
-    $(`td[x=${oldPiece.x}][y=${oldPiece.y}]`).append(rook);
+    oldPiece.element = rookEl[0];
+    
+    $(`td[x=${piece.x}][y=${piece.y}]`).append(kingEl);
+    $(`td[x=${oldPiece.x}][y=${oldPiece.y}]`).append(rookEl);
 
     piece.recalculateAttackingSquares(this);
     oldPiece.recalculateAttackingSquares(this);
