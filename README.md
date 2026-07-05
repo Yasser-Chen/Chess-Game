@@ -18,6 +18,9 @@ This project implements all standard chess moves, rules, and basic checks. It fe
 1.  Install the required dependencies:
 
     ```bash
+    py install 3.10 # optional
+    py -3.10 -m venv .venv
+    .venv\\Scripts\\activate
     pip install -r requirements.txt
     ```
 

@@ -2,7 +2,6 @@ asgiref==3.4.1
 attrs==21.4.0
 autobahn==21.11.1
 Automat==20.2.0
-backports.zoneinfo==0.2.1
 cffi==1.15.0
 channels==3.0.4
 constantly==15.1.0
