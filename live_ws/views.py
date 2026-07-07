@@ -5,9 +5,8 @@ import time
 # Create your views here.
 
 def lobby(request):
-    return render   (request, 'game/index.html',
-                        {
-                            'MY_USER_ID'    : uuid.uuid4() ,
-                            'prio'          : round(time.time() * 1000) ,
-                        }
-                    )
+    server_time = round(time.time() * 1000)
+    return render(request, 'game/index.html', {
+        'MY_USER_ID': str(uuid.uuid4()),
+        'server_time': server_time,
+    })

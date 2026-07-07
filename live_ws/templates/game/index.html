@@ -228,7 +228,8 @@
 
     <script>
       const MY_USER_ID = "{{ MY_USER_ID }}";
-      const priority = "{{ prio }}";
+      // Priority for match-making (based on server timestamp)
+      window.priority = Number("{{ server_time }}");  // Django template variable, no quotes needed for numbers
     </script>
 
     <script src="static/jquery/jquery.js"></script>
@@ -237,6 +238,9 @@
     <script src="static/bootstrap/bootstrap.js"></script>
     <script src="static/jquery/jquery-ui.js"></script>
     <script src="static/jquery/jquery.simulate.js"></script>
+
+    <!-- Clock synchronization module (must load before menu.js) -->
+    <script src="static/classes/clock_sync.js"></script>
 
     <!-- Chess game files -->
     <script src="static/classes/utils.js"></script>

@@ -1,23 +1,55 @@
 import json
+import time
 from channels.generic.websocket import WebsocketConsumer
 from asgiref.sync import async_to_sync
 
-class LiveWebSocketsConsumer(WebsocketConsumer):
-    def connect(self):
-        self.room_group_name = 'test'
 
+class LiveWebSocketsConsumer(WebsocketConsumer):
+    room_group_name = 'test'
+
+    def connect(self):
         async_to_sync(self.channel_layer.group_add)(
             self.room_group_name,
             self.channel_name
         )
 
         self.accept()
-   
+    
 
     def receive(self, text_data):
         text_data_json = json.loads(text_data)
         chess_event = text_data_json['chess_event']
+        
+        # Handle clock sync requests
+        if isinstance(chess_event, str):
+            event = json.loads(chess_event)
+        else:
+            event = chess_event
+            
+        event_type = event.get('type', '')
+        
+        if event_type == 'clock_sync_request':
+            client_send_time = event.get('client_send_time', 0)
+            server_time = round(time.time() * 1000)
+            # Send back server time for clock sync calculation
+            self.send(text_data=json.dumps({
+                'type': 'clock_sync_response',
+                'server_time': server_time,
+                'client_send_time': client_send_time
+            }))
+            return
 
+        server_time = round(time.time() * 1000)
+        if event_type == 'sync':
+            # Authoritatively schedule match start using the server clock.
+            # This avoids both clients counting down to different local Date.now() values.
+            event['server_time'] = server_time
+            event['date_start'] = server_time + 2000
+            chess_event = json.dumps(event)
+        elif isinstance(event, dict):
+            event.setdefault('server_time', server_time)
+            chess_event = json.dumps(event)
+        
         async_to_sync(self.channel_layer.group_send)(
             self.room_group_name,
             {

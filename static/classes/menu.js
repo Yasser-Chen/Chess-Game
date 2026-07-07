@@ -127,8 +127,17 @@ function initGame() {
 
       window.gameSocket = new WebSocket(url);
 
-      window.gameSocket.onmessage = function (e) {
-        let data = JSON.parse(JSON.parse(e.data).chess_event);
+       window.gameSocket.onmessage = function (e) {
+        let rawData = JSON.parse(e.data);
+        let data = rawData.chess_event ? JSON.parse(rawData.chess_event) : rawData;
+
+        // Handle clock sync responses
+        if (data.type === 'clock_sync_response') {
+          if (window.ClockSync) {
+            window.ClockSync.handleClockSyncResponse(data.server_time, data.client_send_time);
+          }
+          return;
+        }
 
         if (
           !syncDone &&
@@ -148,11 +157,26 @@ function initGame() {
             })
           );
 
-          const date1 = new Date();
+          // Perform initial clock sync using the server-stamped sync message
+          const t1 = Date.now();
+          const t2 = data.server_time || data.date_start;
+          const t3 = t2;
+          const t4 = Date.now();
+          if (t1 > 0 && t2 > 0) {
+            const offset = ((t2 - t1) + (t3 - t4)) / 2;
+            window.setServerTimeOffset(offset);
+            window.lastSyncOffset = offset;
+            window.lastSyncRTT = t4 - t1;
+            window.lastSyncTime = Date.now();
+            console.log('[Clock Sync] Initial offset:', offset.toFixed(2), 'ms');
+          }
+
+          const nowServerTime = window.estimatedServerTime ? window.estimatedServerTime() : Date.now();
+          const date1 = new Date(nowServerTime);
           const date2 = new Date();
           date2.setTime(data.date_start);
 
-          const diffTime = Math.abs(date2 - date1);
+          const diffTime = Math.max(0, date2 - date1);
           console.log(diffTime);
 
           $("#loading_chess_event").html("Match Found");
@@ -163,12 +187,20 @@ function initGame() {
               createNewGame("black");
 
               window.playAs = "black";
+              // Start periodic clock sync after game starts
+              if (window.isGameOnline) {
+                window.startClockSync();
+              }
             }, diffTime);
           } else {
             setTimeout(function () {
               createNewGame("white");
 
               window.playAs = "white";
+              // Start periodic clock sync after game starts
+              if (window.isGameOnline) {
+                window.startClockSync();
+              }
             }, diffTime);
           }
         } else if (data.type == "upgrade") {
@@ -186,14 +218,10 @@ function initGame() {
       setTimeout(function () {
         clearInterval(searchingLoop);
         searchingLoop = setInterval(function () {
-          var uneDateImportant = new Date();
-          uneDateImportant.setSeconds(uneDateImportant.getSeconds() + 2);
-
           window.gameSocket.send(
             JSON.stringify({
               chess_event: JSON.stringify({
                 type: "sync",
-                date_start: uneDateImportant.getTime(),
                 priority: priority,
               }),
             })

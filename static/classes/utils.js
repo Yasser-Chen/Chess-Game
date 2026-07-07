@@ -16,13 +16,13 @@ var dragStart = false;
 window.lastPawnMoved = null;
 
 function initHtmlBoard(board, FLIP = false) {
-  let iStart = 0,
+  let iStart = 1,
     jStart = 1,
     Di = 1,
     Dj = 1;
 
   if (FLIP) {
-    iStart = 9;
+    iStart = 8;
     jStart = 8;
     Di = -1;
     Dj = -1;
@@ -121,37 +121,61 @@ function diff(num1, num2) {
 }
 
 function startTimer(seconds, oncomplete, display) {
-  let startTime,
-    timer,
-    ms = seconds * 1000,
+  let timer,
+    // Use server time as reference when available, fall back to local time
+    gameStartTime = getTimerNow(),
+    ms = sanitizeTimerSeconds(seconds) * 1000,
     obj = {};
+
+  function getTimerNow() {
+    const now = window.estimatedServerTime ? window.estimatedServerTime() : new Date().getTime();
+    return Number.isFinite(now) ? now : new Date().getTime();
+  }
+
+  function sanitizeTimerSeconds(value) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  }
+
+  function getMoveIncrementMs() {
+    const increment = Number(window.increment);
+    return window.normalMovesCounter > 0 && Number.isFinite(increment) && increment > 0
+      ? increment * 1000
+      : 0;
+  }
+
+  function renderTime(now) {
+    now = Number.isFinite(now) ? Math.max(0, now) : 0;
+    const m = Math.floor(now / 60000),
+      s = Math.floor(now / 1000) % 60;
+    const formattedSeconds = (s < 10 ? "0" : "") + s;
+    const formattedMinutes = (m < 10 ? "0" : "") + m;
+    if (display) {
+      display.innerHTML = formattedMinutes + ":" + formattedSeconds;
+    }
+  }
+    
   obj.resume = function () {
-    startTime = new Date().getTime();
+    // Use estimated server time for startTime reference
+    gameStartTime = getTimerNow();
     if (timer != undefined) {
       clearInterval(timer);
     }
     timer = setInterval(obj.step, 250);
   };
   obj.pause = function () {
-    ms = obj.step();
-    var currentIncrement = window.normalMovesCounter > 0 ? window.increment : 0;
-    var now = Math.max(0, ms + currentIncrement * 1000),
-      m = Math.floor(now / 60000),
-      s = Math.floor(now / 1000) % 60;
-
-    s = (s < 10 ? "0" : "") + s;
-    m = (m < 10 ? "0" : "") + m;
-
-    display.innerHTML = m + ":" + s;
+    ms = Math.max(0, obj.step()) + getMoveIncrementMs();
+    renderTime(ms);
 
     clearInterval(timer);
   };
 
   obj.step = function () {
-    var currentIncrement = window.normalMovesCounter > 0 ? window.increment : 0;
+    // Use estimated server time instead of local time
+    var currentTime = getTimerNow();
     var now = Math.max(
         0,
-        ms - (new Date().getTime() - startTime - currentIncrement * 1000)
+        ms - (currentTime - gameStartTime)
       ),
       m = Math.floor(now / 60000),
       s = Math.floor(now / 1000) % 60;
@@ -187,7 +211,7 @@ function startTimer(seconds, oncomplete, display) {
 function resisePageMobile() {
   if (window.innerWidth <= 800) {
     //Detect mobile
-    $("#timerHolder").css({ display: "none" });
+    $("#timerHolder").css({ display: "unset" });
     $("#spacer").css({ display: "none" });
   } else {
     //Detect other higher resolution screens
