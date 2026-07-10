@@ -11,13 +11,6 @@ function Piece(x, y, color) {
     this.element = $(`<i class="fg-${color} fas fa-pizza-slice"></i>`);
   }
   this.element.data("piece", this);
-  this.element.draggable({
-    drag: onPieceDrag,
-    accept: "td",
-    containment: "#game",
-    stop: onPieceStopDrag,
-    scroll: false,
-  });
 }
 
 Piece.prototype.isLegal = function (board, x, y) {

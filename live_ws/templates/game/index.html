@@ -15,100 +15,177 @@
     <link rel="stylesheet" href="static/fontawesome/font-awesome.css" />
     <link rel="stylesheet" href="static/style.css" />
   </head>
-  <body style="overflow: hidden" oncontextmenu="return false;">
+  <body style="overflow-x: hidden; overflow-y: auto;" oncontextmenu="return false;">
     <div id="game" class="role-black">
-      <table class="board" id="board">
-        <thead>
-          <tr></tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td class="square white cords cords-8"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-          </tr>
-          <tr>
-            <td class="square black cords cords-7"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-          </tr>
-          <tr>
-            <td class="square white cords cords-6"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-          </tr>
-          <tr>
-            <td class="square black cords cords-5"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-          </tr>
-          <tr>
-            <td class="square white cords cords-4"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-          </tr>
-          <tr>
-            <td class="square black cords cords-3"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-          </tr>
-          <tr>
-            <td class="square white cords cords-2"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-            <td class="square white"></td>
-            <td class="square black"></td>
-          </tr>
-          <tr>
-            <td class="square black cords cords-1 cords-a"></td>
-            <td class="square white cords cords-b"></td>
-            <td class="square black cords cords-c"></td>
-            <td class="square white cords cords-d"></td>
-            <td class="square black cords cords-e"></td>
-            <td class="square white cords cords-f"></td>
-            <td class="square black cords cords-g"></td>
-            <td class="square white cords cords-h"></td>
-          </tr>
-        </tbody>
-      </table>
+      <div class="zoom-control-hover-zone" aria-hidden="true"></div>
+      <div class="resize-visibility-toggle-shell" aria-hidden="false">
+        <button
+          id="resizeToggleBtn"
+          type="button"
+          class="resize-visibility-toggle"
+          title="Hide resize buttons"
+          aria-label="Hide resize buttons"
+        >
+          <i id="resizeToggleIcon" class="fas fa-eye"></i>
+        </button>
+      </div>
+      <div class="board-zoom-controls" aria-label="Board zoom controls">
+        <button
+          id="perfectZoomBtn"
+          type="button"
+          class="board-zoom-button board-zoom-button-wide"
+          title="Fit board to screen"
+          aria-label="Fit board to screen"
+        >
+          Fit
+        </button>
+        <button
+          id="zoomOutBtn"
+          type="button"
+          class="board-zoom-button"
+          title="Zoom out"
+          aria-label="Zoom out"
+        >
+          −
+        </button>
+        <button
+          id="zoomInBtn"
+          type="button"
+          class="board-zoom-button"
+          title="Zoom in"
+          aria-label="Zoom in"
+        >
+          +
+        </button>
+        <button
+          id="fullscreenBtn"
+          type="button"
+          class="board-zoom-button"
+          title="Enter fullscreen"
+          aria-label="Enter fullscreen"
+        >
+          ⛶
+        </button>
+      </div>
+      <div id="boardArea">
+        <table class="board" id="board">
+          <tbody>
+            <tr>
+              <td class="square white cords cords-8"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+            </tr>
+            <tr>
+              <td class="square black cords cords-7"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+            </tr>
+            <tr>
+              <td class="square white cords cords-6"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+            </tr>
+            <tr>
+              <td class="square black cords cords-5"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+            </tr>
+            <tr>
+              <td class="square white cords cords-4"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+            </tr>
+            <tr>
+              <td class="square black cords cords-3"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+            </tr>
+            <tr>
+              <td class="square white cords cords-2"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+              <td class="square white"></td>
+              <td class="square black"></td>
+            </tr>
+            <tr>
+              <td class="square black cords cords-1 cords-a"></td>
+              <td class="square white cords cords-b"></td>
+              <td class="square black cords cords-c"></td>
+              <td class="square white cords cords-d"></td>
+              <td class="square black cords cords-e"></td>
+              <td class="square white cords cords-f"></td>
+              <td class="square black cords cords-g"></td>
+              <td class="square white cords cords-h"></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
 
       <div id="spacer">&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;</div>
-      <div id="timerHolder">
-        <div id="BlackTimer">05:00</div>
-        <div id="WhiteTimer">05:00</div>
+      <div id="sidePanelHolder">
+        <div id="timerHolder">
+          <div class="clock-block clock-block-black">
+            <div id="BlackGameActions" class="clock-game-actions" data-action-color="black"></div>
+            <div id="BlackTimer">05:00</div>
+          </div>
+          <div class="clock-block clock-block-white">
+            <div id="WhiteTimer">05:00</div>
+            <div id="WhiteGameActions" class="clock-game-actions" data-action-color="white"></div>
+          </div>
+        </div>
+        <div id="historyNavigationControls" aria-label="Position history navigation">
+          <button
+            id="historyBackBtn"
+            type="button"
+            class="history-nav-button"
+            title="Previous position"
+            aria-label="Previous position"
+          >
+            <i class="fas fa-angle-left"></i>
+          </button>
+          <button
+            id="historyForwardBtn"
+            type="button"
+            class="history-nav-button"
+            title="Next position"
+            aria-label="Next position"
+          >
+            <i class="fas fa-angle-right"></i>
+          </button>
+        </div>
       </div>
       <div class="overlay">
         <div class="row card" id="loadding_pannnel" style="display: none">
@@ -117,29 +194,29 @@
               Looking for a match
             </h1>
 
-            <div class="spinner-grow text-primary" role="status">
-              <span class="sr-only">Loading...</span>
+            <div class="matchmaking-spinner-row" aria-hidden="true">
+              <div class="spinner-grow text-secondary" role="status">
+                <span class="sr-only">Loading...</span>
+              </div>
+              <div class="spinner-grow text-secondary" role="status">
+                <span class="sr-only">Loading...</span>
+              </div>
+              <div class="spinner-grow text-secondary" role="status">
+                <span class="sr-only">Loading...</span>
+              </div>
+              <div class="spinner-grow text-secondary" role="status">
+                <span class="sr-only">Loading...</span>
+              </div>
             </div>
-            <div class="spinner-grow text-secondary" role="status">
-              <span class="sr-only">Loading...</span>
-            </div>
-            <div class="spinner-grow text-success" role="status">
-              <span class="sr-only">Loading...</span>
-            </div>
-            <div class="spinner-grow text-danger" role="status">
-              <span class="sr-only">Loading...</span>
-            </div>
-            <div class="spinner-grow text-warning" role="status">
-              <span class="sr-only">Loading...</span>
-            </div>
-            <div class="spinner-grow text-info" role="status">
-              <span class="sr-only">Loading...</span>
-            </div>
-            <div class="spinner-grow text-light" role="status">
-              <span class="sr-only">Loading...</span>
-            </div>
-            <div class="spinner-grow text-dark" role="status">
-              <span class="sr-only">Loading...</span>
+            <div class="matchmaking-actions">
+              <button
+                id="cancelMatchmakingBtn"
+                type="button"
+                class="btn btn-outline-secondary btn-sm matchmaking-cancel-btn"
+                onclick="cancelOnlineMatchmaking()"
+              >
+                Cancel
+              </button>
             </div>
           </div>
         </div>
@@ -193,19 +270,19 @@
                     checked
                   />
                   <span class="small">
-                    PLay Online <i class="fas fa-globe-africa small"></i>
+                    PLay Online <i class="fas fa-globe-africa menu-mode-icon"></i>
                   </span>
                 </label>
                 <label class="btn btn-outline-dark">
                   <input type="radio" name="mode_of_play" value="offline" />
                   <span class="small">
-                    PLay Offline <i class="fas fa-user-friends small"></i
+                    PLay Offline <i class="fas fa-user-friends menu-mode-icon"></i
                   ></span>
                 </label>
                 <label class="btn btn-outline-secondary">
                   <input type="radio" name="mode_of_play" value="vs_bot" />
                   <span class="small">
-                    PLay vs Bot <i class="fas fa-robot small"></i
+                    PLay vs Bot <i class="fas fa-robot menu-mode-icon"></i
                   ></span>
                 </label>
               </div>
@@ -237,7 +314,6 @@
     <script src="static/bootstrap/popover.js"></script>
     <script src="static/bootstrap/bootstrap.js"></script>
     <script src="static/jquery/jquery-ui.js"></script>
-    <script src="static/jquery/jquery.simulate.js"></script>
 
     <!-- Clock synchronization module (must load before menu.js) -->
     <script src="static/classes/clock_sync.js"></script>

@@ -1336,10 +1336,10 @@ describe('Piece Movement Validation', () => {
 // ============================================================
 
 describe('Special Chess Rules', () => {
-  test('should handle 15-move rule', () => {
+  test('should handle 50-move rule', () => {
     const board = createTestBoard();
-    board.movesCounter = 30;
-    expect(board.movesCounter).toBe(30);
+    board.movesCounter = 50;
+    expect(board.movesCounter).toBe(50);
   });
 
   test('should handle repetition detection', () => {

@@ -5,9 +5,20 @@ from asgiref.sync import async_to_sync
 
 
 class LiveWebSocketsConsumer(WebsocketConsumer):
-    room_group_name = 'test'
-
     def connect(self):
+        route_kwargs = self.scope.get('url_route', {}).get('kwargs', {})
+        game_time_seconds = route_kwargs.get('game_time_seconds')
+        increment_seconds = route_kwargs.get('increment_seconds')
+
+        try:
+            game_time_seconds = int(game_time_seconds)
+            increment_seconds = int(increment_seconds)
+        except (TypeError, ValueError):
+            self.close(code=4000)
+            return
+
+        self.room_group_name = f'online_chess_{game_time_seconds}_{increment_seconds}'
+
         async_to_sync(self.channel_layer.group_add)(
             self.room_group_name,
             self.channel_name

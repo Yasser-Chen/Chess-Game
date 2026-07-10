@@ -1,4 +1,9 @@
 function botMove(board, color) {
+  if (!board || window.gameState != "playing") {
+    window.BotPlaying = false;
+    return false;
+  }
+
   let possibleMove = [];
 
   for (const piece of board.pieces) {
@@ -19,8 +24,20 @@ function botMove(board, color) {
   let move =
     possibleMove[Math.floor(Math.random() * possibleMove.length)] ?? null;
 
-  window.BotPlaying = true;
   if (move) {
-    makeMove(board, move.x, move.y, move.newX, move.newY);
+    window.BotPlaying = true;
+    let moveWasPlayed = makeMove(board, move.x, move.y, move.newX, move.newY);
+    if (!moveWasPlayed) {
+      window.BotPlaying = false;
+    }
+    return moveWasPlayed;
   }
+
+  window.BotPlaying = false;
+  return false;
+}
+
+// CommonJS export for Node.js testing
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = botMove;
 }
