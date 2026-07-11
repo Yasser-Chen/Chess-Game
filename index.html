@@ -5,7 +5,7 @@
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Chess Game</title>
-    <link rel="icon" type="image/x-icon" href="/static/favicon.ico" />
+    <link rel="icon" type="image/x-icon" href="static/favicon.ico" />
     <link rel="stylesheet" href="static/bootstrap/bootstrap.css" />
     <link rel="stylesheet" href="static/bs-toggle/bootstrap4-toggle.min.css" />
     <link rel="stylesheet" href="static/fonts.googleapis.com.css?family=Source+Sans+Pro:300,400,400i,700&display=fallback" />
@@ -259,19 +259,19 @@
           <div class="col-12">
             <div class="d-flex justify-content-center">
               <div class="btn-group btn-group-toggle" data-toggle="buttons">
-                <label class="btn btn-outline-success active">
+                <label class="btn btn-outline-success disabled" aria-disabled="true" title="Online mode requires the Django/WebSocket backend">
                   <input
                     type="radio"
                     name="mode_of_play"
                     value="online"
-                    checked
+                    disabled
                   />
                   <span class="small">
                     PLay Online <i class="fas fa-globe-africa menu-mode-icon"></i>
                   </span>
                 </label>
-                <label class="btn btn-outline-dark">
-                  <input type="radio" name="mode_of_play" value="offline" />
+                <label class="btn btn-outline-dark active">
+                  <input type="radio" name="mode_of_play" value="offline" checked />
                   <span class="small">
                     PLay Offline <i class="fas fa-user-friends menu-mode-icon"></i
                   ></span>
@@ -301,9 +301,10 @@
     </div>
 
     <script>
-      const MY_USER_ID = "{{ MY_USER_ID }}";
-      // Priority for match-making (based on server timestamp)
-      window.priority = Number("{{ server_time }}");  // Django template variable, no quotes needed for numbers
+      window.STATIC_EXPORT = true;
+      const MY_USER_ID = "static-export-user";
+      // Static exports do not have Django server timestamps or WebSockets.
+      window.priority = Date.now();
     </script>
 
     <script src="static/jquery/jquery.js"></script>

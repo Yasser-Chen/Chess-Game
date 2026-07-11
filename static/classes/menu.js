@@ -364,6 +364,11 @@ function initGame() {
 
   if (isValid) {
     if ($('input[name="mode_of_play"]:checked').val() == "online") {
+      if (window.STATIC_EXPORT) {
+        alert("Online mode requires the Django/WebSocket backend. Please choose offline or vs bot.");
+        return;
+      }
+
       $("#loadding_pannnel").css({ display: "flex" });
       $("#main_pannnel").css({ display: "none" });
       setMatchmakingCancelEnabled(true);
