@@ -1752,6 +1752,36 @@ Board.prototype.showGameOverOverlay = function (resultContentHtml) {
   const overlay = $(".overlay");
   if (!overlay.length) return;
 
+  const boardObject = this;
+  window.gameResultHubShowable = true;
+  window.gameResultHubDismissed = false;
+
+  function hideResultHubForAnalysis() {
+    if (!window.gameResultHubShowable) return;
+    window.gameResultHubDismissed = true;
+    resultsPanel.css("display", "none");
+    overlay.css("display", "none");
+  }
+
+  function showResultHubAgain() {
+    if (!window.gameResultHubShowable || window.gameState == "playing") return;
+    window.gameResultHubDismissed = false;
+    overlay.css("display", "flex");
+    overlay.find("#main_pannnel").css("display", "none");
+    overlay.find("#loadding_pannnel").css("display", "none");
+    resultsPanel.css("display", "block");
+  }
+
+  function stopShowingResultHub() {
+    window.gameResultHubShowable = false;
+    window.gameResultHubDismissed = false;
+    $(document).off("click.gameResultHubToggle keydown.gameResultHubToggle");
+  }
+
+  window.hideGameResultHubForAnalysis = hideResultHubForAnalysis;
+  window.showGameResultHubAgain = showResultHubAgain;
+  window.stopShowingGameResultHub = stopShowingResultHub;
+
   // Show overlay, hide main hub panel, show results panel
   overlay.css("display", "flex");
   overlay.find("#main_pannnel").css("display", "none");
@@ -1760,7 +1790,8 @@ Board.prototype.showGameOverOverlay = function (resultContentHtml) {
   let resultsPanel = overlay.find("#results_pannnel");
   if (!resultsPanel.length) {
     resultsPanel = $(
-      '<div class="row card" id="results_pannnel" style="display:none; margin-top: 20px;">' +
+      '<div class="row card" id="results_pannnel" style="display:none; margin-top: 20px; position: relative;">' +
+        '<button id="dismissResultsBtn" type="button" aria-label="Hide result hub" title="Hide result hub" style="position:absolute; top:6px; right:8px; border:0; background:transparent; font-size:22px; line-height:1; cursor:pointer; z-index:2;">&times;</button>' +
         '<div class="col-12" style="line-height:10px !important">&nbsp;</div>' +
         '<div class="col-12">' +
         '  <div class="d-flex justify-content-center">' +
@@ -1785,20 +1816,61 @@ Board.prototype.showGameOverOverlay = function (resultContentHtml) {
   overlay.find("#results_content").html(resultContentHtml);
   resultsPanel.css("display", "block");
 
+  resultsPanel.find("#dismissResultsBtn").off("click").on("click", function (event) {
+    event.preventDefault();
+    event.stopPropagation();
+    hideResultHubForAnalysis();
+  });
+
   // Close button: hide results and show main hub
   resultsPanel.find("#closeResultsBtn").off("click").on("click", function () {
+    stopShowingResultHub();
     resultsPanel.css("display", "none");
+    overlay.css("display", "flex");
     overlay.find("#main_pannnel").css("display", "block");
   });
 
   // Restart button: reset game and immediately start a new game
   resultsPanel.find("#replayBtn").off("click").on("click", function () {
+    stopShowingResultHub();
     resultsPanel.css("display", "none");
     window.resetGameAndStartNew();
   });
+
+  $(document)
+    .off("click.gameResultHubToggle keydown.gameResultHubToggle")
+    .on("click.gameResultHubToggle", function (event) {
+      if (!window.gameResultHubShowable || !window.gameResultHubDismissed || window.gameState == "playing") return;
+
+      const target = event.target;
+      const isBoardClick = target && typeof target.closest == "function" && target.closest("#board, #boardArea");
+      const isExemptControl =
+        target &&
+        typeof target.closest == "function" &&
+        target.closest(
+          "button, .btn, #resizeToggleBtn, #perfectZoomBtn, #zoomOutBtn, #zoomInBtn, #fullscreenBtn, #historyBackBtn, #historyForwardBtn, .board-zoom-controls, .history-navigation-controls, input, select, textarea, label, a"
+        );
+
+      if (isBoardClick || !isExemptControl) {
+        showResultHubAgain();
+      }
+    })
+    .on("keydown.gameResultHubToggle", function (event) {
+      const isEscape = event.key == "Escape" || event.key == "Esc" || event.which == 27;
+      if (!isEscape || !window.gameResultHubShowable || window.gameState == "playing") return;
+      event.preventDefault();
+      if (window.gameResultHubDismissed || resultsPanel.css("display") == "none") {
+        showResultHubAgain();
+      } else {
+        hideResultHubForAnalysis();
+      }
+    });
 };
 
 Board.prototype.resetGame = function () {
+  if (typeof window.stopShowingGameResultHub == "function") {
+    window.stopShowingGameResultHub();
+  }
   this.finalizeGame({ type: "game_over", result: "draw", reason: "Game reset" });
   this.positionHistory = [];
   this.positionHistoryIndex = -1;
