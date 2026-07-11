@@ -4,15 +4,19 @@ This project implements all standard chess moves, rules, and basic checks. It fe
 
 ### To Do:
 
-- [Implement board flipping for each color's perspective](https://github.com/Yasser-Chen/chessGame/issues/1).
-- [Add login functionality and user color randomization](https://github.com/Yasser-Chen/chessGame/issues/2).
-- [Implement more robust timers](https://github.com/Yasser-Chen/chessGame/issues/3).
-- [Secure the application against vulnerabilities](https://github.com/Yasser-Chen/chessGame/issues/4).
-- [Implement premoves](https://github.com/Yasser-Chen/chessGame/issues/5).
-- [Make the board responsive for different screen sizes](https://github.com/Yasser-Chen/chessGame/issues/6).
 - [Develop an AI opponent that makes optimal moves using deep learning techniques](https://github.com/Yasser-Chen/chessGame/issues/7).
-- [Fix the bug that occurs after castling](https://github.com/Yasser-Chen/chessGame/issues/8).
-- [Add resigne functionality](https://github.com/Yasser-Chen/Chess-Game/issues/9).
+- [Implement premoves](https://github.com/Yasser-Chen/chessGame/issues/5).
+- [Secure the application against vulnerabilities](https://github.com/Yasser-Chen/chessGame/issues/4).
+- [Add login functionality and user color randomization](https://github.com/Yasser-Chen/chessGame/issues/2).
+
+### Try the App:
+
+You can try the static offline version of the app here:
+
+https://yasser-chen.github.io/Chess-Game/
+
+This version does not include online gameplay features. To test the full local project, follow the running steps below.
+
 ### Running the Project:
 
 1.  Install the required dependencies:
