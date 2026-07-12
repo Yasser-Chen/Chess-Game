@@ -30,90 +30,49 @@ King.prototype.recalculateAttackingSquares = function (board) {
 };
 King.prototype.isLegal = function (board, x, y) {
   let oldPiece = board.pieceAtSquare(x, y);
-  // can't eat same color
-  if (oldPiece) {
-    if (oldPiece.color == this.color) {
-      //can't castle in check and can't when a square is attacked ! you can if the rook is attacked so no worried looking if that square is attacked ! now only
-      /*
-                      LONG CASTLING :
-                          Y2 
-                          Y3 
-                          Y4
-                      SHORT CASTLING :
-                          Y6 
-                          Y7 
-                      NOT ATTACKED BY OPPOSITE COLORS !
-                  */
-      if (
-        oldPiece.constructor.name == "Rook" &&
-        !oldPiece.firstMoveDone &&
-        !this.firstMoveDone &&
-        this.x == oldPiece.x
-      ) {
-        if (oldPiece.y > this.y) {
-          // SHORT CASTELING
-          if (
-            board.pieceAtSquare(this.x, 6) ||
-            board.pieceAtSquare(this.x, 7)
-          ) {
-            return false;
-          } else {
-            for (const posiblPiece of board.pieces) {
-              if (posiblPiece) {
-                if (posiblPiece.color != this.color) {
-                  posiblPiece.recalculateAttackingSquares(board);
+  if (oldPiece && oldPiece.color == this.color) {
+    const homeRank = this.color == "white" ? 8 : 1;
+    const isHomeRook =
+      oldPiece.constructor.name == "Rook" &&
+      oldPiece.x == homeRank &&
+      (oldPiece.y == 1 || oldPiece.y == 8);
 
-                  if (
-                    posiblPiece.attackingSquares.exists({ x: this.x, y: 6 }) ||
-                    posiblPiece.attackingSquares.exists({ x: this.x, y: 7 })
-                  ) {
-                    return false;
-                  }
-                }
-              }
-            }
-          }
-        } else {
-          // LONG CASTELING
-          if (
-            board.pieceAtSquare(this.x, 4) ||
-            board.pieceAtSquare(this.x, 3) ||
-            board.pieceAtSquare(this.x, 2)
-          ) {
-            return false;
-          } else {
-            for (const posiblPiece of board.pieces) {
-              if (posiblPiece) {
-                if (posiblPiece.color != this.color) {
-                  posiblPiece.recalculateAttackingSquares(board);
-
-                  if (
-                    posiblPiece.attackingSquares.exists({ x: this.x, y: 2 }) ||
-                    posiblPiece.attackingSquares.exists({ x: this.x, y: 3 }) ||
-                    posiblPiece.attackingSquares.exists({ x: this.x, y: 4 })
-                  ) {
-                    return false;
-                  }
-                }
-              }
-            }
-          }
-        }
-        return true;
-      }
+    if (
+      !isHomeRook ||
+      this.x != homeRank ||
+      this.y != 5 ||
+      this.firstMoveDone ||
+      oldPiece.firstMoveDone
+    ) {
       return false;
     }
+
+    const isKingside = oldPiece.y == 8;
+    const emptyFiles = isKingside ? [6, 7] : [4, 3, 2];
+    const safeKingFiles = isKingside ? [5, 6, 7] : [5, 4, 3];
+
+    if (emptyFiles.some((file) => board.pieceAtSquare(homeRank, file))) {
+      return false;
+    }
+
+    for (const possiblePiece of board.pieces) {
+      if (!possiblePiece || possiblePiece.color == this.color) continue;
+      possiblePiece.recalculateAttackingSquares(board);
+      if (safeKingFiles.some((file) =>
+        possiblePiece.attackingSquares.exists({ x: homeRank, y: file })
+      )) {
+        return false;
+      }
+    }
+
+    return true;
   }
 
-  if (
+  return (
     (this.x + 1 == x || this.x - 1 == x || this.x == x) &&
-    (this.y + 1 == y || this.y - 1 == y || this.y == y)
-  ) {
-  } else {
-    return false;
-  }
-
-  return true;
+    (this.y + 1 == y || this.y - 1 == y || this.y == y) &&
+    (this.x != x || this.y != y)
+  );
 };
 
 // CommonJS export for Node.js testing

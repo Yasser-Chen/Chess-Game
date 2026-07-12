@@ -57,6 +57,9 @@ window.resetGameAndStartNew = function () {
   // Use the stored playAs value (white or black) from the previous game
   const playAs = window._lastPlayAs || "white";
   const mode = $('input[name="mode_of_play"]:checked').val();
+  if (mode == "vs_bot" && typeof window.setSelectedBotType == "function") {
+    window.setSelectedBotType($("#botTypeSelect").val());
+  }
 
   // Set mode-specific state before creating the game
   if (mode == "vs_bot") {
@@ -215,6 +218,30 @@ function closeActiveGameSocket() {
   window.gameSocket = null;
 }
 
+function updateBotOptionsVisibility() {
+  const isVsBot = $('input[name="mode_of_play"]:checked').val() == "vs_bot";
+  $("#botOptionsPanel").toggle(isVsBot);
+}
+
+$(document).on("change", 'input[name="mode_of_play"]', updateBotOptionsVisibility);
+
+$(document).on("change", "#botTypeSelect", function () {
+  if (typeof window.setSelectedBotType == "function") {
+    window.setSelectedBotType($(this).val());
+  } else {
+    window.selectedBotType = $(this).val() || "weak";
+  }
+});
+
+$(function () {
+  updateBotOptionsVisibility();
+  if (typeof window.setSelectedBotType == "function") {
+    window.setSelectedBotType($("#botTypeSelect").val());
+  } else {
+    window.selectedBotType = $("#botTypeSelect").val() || "weak";
+  }
+});
+
 function cancelOnlineMatchmaking() {
   if (syncDone) {
     return;
@@ -245,6 +272,13 @@ var createNewGame = (playAs) => {
   window.lastPawnMoved = null;
   window.lastUpgradedPiece = false;
   window.pendingGameOver = null;
+  if ($('input[name="mode_of_play"]:checked').val() == "vs_bot") {
+    if (typeof window.setSelectedBotType == "function") {
+      window.setSelectedBotType($("#botTypeSelect").val());
+    } else {
+      window.selectedBotType = $("#botTypeSelect").val() || "weak";
+    }
+  }
 
   // If a board already exists, reset it first
   if (window.board) {
@@ -485,13 +519,17 @@ function initGame() {
           return;
         } else if (data.type == "upgrade") {
           window.lastUpgradedPiece = data.piece;
-          makeMove(board, data.x, data.y, data.newX, data.newY, { animate: true });
+          if (makeMove(board, data.x, data.y, data.newX, data.newY, { animate: true, remote: true }) && board && typeof board.tryExecutePremoveStack == "function") {
+            board.tryExecutePremoveStack();
+          }
         } else if (
           data.type != "upgrade" &&
           data.type != "sync" &&
           data.type != "sync_accepted"
         ) {
-          makeMove(board, data.x, data.y, data.newX, data.newY, { animate: true });
+          if (makeMove(board, data.x, data.y, data.newX, data.newY, { animate: true, remote: true }) && board && typeof board.tryExecutePremoveStack == "function") {
+            board.tryExecutePremoveStack();
+          }
         }
       };
 

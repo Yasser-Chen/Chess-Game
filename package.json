@@ -29,5 +29,8 @@
     "jest": "^30.4.2",
     "jest-environment-jsdom": "^30.4.1",
     "jsdom": "^24.1.0"
+  },
+  "dependencies": {
+    "stockfish": "^18.0.8"
   }
 }

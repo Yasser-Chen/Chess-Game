@@ -25,6 +25,27 @@ function cloneLastMoveSquares(squares) {
   });
 }
 
+function getAuthoritativeMoveTarget(pieces, movingPiece, moveOptions) {
+  moveOptions = moveOptions || {};
+  if (Object.prototype.hasOwnProperty.call(moveOptions, "capturedPiece")) {
+    return moveOptions.capturedPiece;
+  }
+
+  return (pieces || []).find(function (candidate) {
+    return candidate &&
+      candidate != movingPiece &&
+      candidate.x == movingPiece.x &&
+      candidate.y == movingPiece.y;
+  }) || null;
+}
+
+const CHESS_RECAP_PIECE_VALUES = { Pawn: 1, Knight: 3, Bishop: 3, Rook: 5, Queen: 9, King: 0 };
+const CHESS_RECAP_PIECE_ICONS = { Pawn: "fa-chess-pawn", Knight: "fa-chess-knight", Bishop: "fa-chess-bishop", Rook: "fa-chess-rook", Queen: "fa-chess-queen", King: "fa-chess-king" };
+function chessRecapPieceValue(type) { return CHESS_RECAP_PIECE_VALUES[type] || 0; }
+function chessRecapPieceIcon(type) { return CHESS_RECAP_PIECE_ICONS[type] || "fa-chess-pawn"; }
+function chessRecapFormatDuration(ms) { ms = Math.max(0, Number(ms) || 0); const s = ms / 1000; return s < 10 ? `${s.toFixed(1)}s` : `${Math.round(s)}s`; }
+function chessRecapEscape(value) { return String(value == null ? "" : value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+
 function animatePieceTranslation(sourceElement, fromRect, toRect, finalElement) {
   const moveAnimationDuration =
     typeof animationTime != "undefined" ? animationTime : 100;
@@ -154,6 +175,9 @@ function consumeMatchingSnapshotPiece(candidates, matcher) {
 
 function Board(board, playAs) {
   window.gameState = "playing";
+  if (typeof window.hideEvaluationBar == "function") {
+    window.hideEvaluationBar();
+  }
   let bigBoardObject = this;
   this.movesCounter = 0;
   this.movesPlayedByColor = { white: 0, black: 0 };
@@ -165,6 +189,10 @@ function Board(board, playAs) {
   this.moves = [];
   this.positionHistory = [];
   this.positionHistoryIndex = -1;
+  this.moveRecap = [];
+  this.evaluationHistory = [];
+  this.lastMoveStartedAt = Date.now();
+  this.lastMoveDetails = null;
   this.isHistoryPreview = false;
   this.pendingHistoryMove = null;
   this.pendingHistoryTurn = null;
@@ -176,7 +204,13 @@ function Board(board, playAs) {
   this.pendingDrawOffer = null;
   this.drawOfferSent = false;
   this.fiftyMoveDrawClaimElement = null;
+  this.premoveStack = [];
+  this.premoveVisualPositions = new Map();
+  this.isExecutingPremoveStack = false;
   this.removeFiftyMoveDrawClaimButton();
+  if (typeof window.resetClockVisuals == "function") {
+    window.resetClockVisuals();
+  }
   this.timerWhite = startTimer(
     window.timeSetted + 0.5,
     function () {
@@ -202,6 +236,7 @@ function Board(board, playAs) {
     .removeClass("game-over role-black role-white play-as-black play-as-white history-preview")
     .addClass(`role-${this.turn} play-as-${boardOrientation}`);
   this.bindHistoryNavigationControls();
+  this.updateCapturedPiecesDisplay();
   $("td").droppable({
     drop: function (event, ui) {
       event.stopPropagation();
@@ -221,6 +256,16 @@ function Board(board, playAs) {
 
       if (!bigBoardObject.isInsideBoard(x, y)) {
         bigBoardObject.resetPiecePosition(piece);
+        return;
+      }
+
+      if (
+        bigBoardObject.canQueuePremoveForPiece(piece) &&
+        !window.isApplyingRemoteMove &&
+        bigBoardObject.turn != piece.color &&
+        bigBoardObject.isPremoveDropChangingVisualSquare(piece, x, y)
+      ) {
+        bigBoardObject.queuePremove(piece, x, y);
         return;
       }
 
@@ -297,6 +342,9 @@ function Board(board, playAs) {
             pawnReachedPromotionRank && !moveIsCapture;
 
           bigBoardObject.moveTo(piece, square, {
+            fromX: originX,
+            fromY: originY,
+            capturedPiece: targetPieceBeforeMove || null,
             isCapture: moveIsCapture,
             deferMoveSound: deferQuietPromotionMoveSound,
             turnAfterMove: piece.color == "white" ? "black" : "white",
@@ -350,7 +398,8 @@ function Board(board, playAs) {
             };
 
             if (window.isGameOnline && window.lastUpgradedPiece) {
-              finishPromotion(window[window.lastUpgradedPiece] || Queen);
+              const upgradedPieceName = window.lastUpgradedPiece;
+              finishPromotion(window[upgradedPieceName] || Queen, upgradedPieceName);
               window.lastUpgradedPiece = false;
             } else if (window.isGameVsBot && window.BotPlaying) {
               finishPromotion(Queen);
@@ -503,9 +552,19 @@ Board.prototype.finalizeGame = function (payload) {
   const wasPlaying = window.gameState == "playing";
   window.gameState = "notPlaying";
   window.gameOverResult = payload || window.gameOverResult || { type: "game_over" };
+  if (typeof window.showFinalEvaluation == "function") {
+    window.showFinalEvaluation(window.gameOverResult);
+  }
   window.BotPlaying = false;
   window.humainIsUpgrading = false;
   window.pendingMoveSoundToken = null;
+  const latestSnapshot = this.positionHistory && this.positionHistory.length
+    ? this.positionHistory[this.positionHistory.length - 1]
+    : null;
+  if (latestSnapshot) {
+    latestSnapshot.clockTimes = this.captureClockTimes();
+  }
+  this.clearPremoveStack();
   this.removeFiftyMoveDrawClaimButton();
   this.removeGameActionControls();
   this.removeGameActionConfirmation();
@@ -1047,12 +1106,22 @@ Board.prototype.highlightMoveSquares = function (squares) {
 Board.prototype.bindHistoryNavigationControls = function () {
   const bigBoardObject = this;
 
+  $("#historyHomeBtn").off("click.chessHistory").on("click.chessHistory", function () {
+    if (!bigBoardObject.positionHistory || !bigBoardObject.positionHistory.length) return;
+    bigBoardObject.previewPositionAt(0);
+  });
+
   $("#historyBackBtn").off("click.chessHistory").on("click.chessHistory", function () {
     bigBoardObject.previewPositionBy(-1);
   });
 
   $("#historyForwardBtn").off("click.chessHistory").on("click.chessHistory", function () {
     bigBoardObject.previewPositionBy(1);
+  });
+
+  $("#historyEndBtn").off("click.chessHistory").on("click.chessHistory", function () {
+    if (!bigBoardObject.positionHistory || !bigBoardObject.positionHistory.length) return;
+    bigBoardObject.previewPositionAt(bigBoardObject.positionHistory.length - 1);
   });
 
   $(document)
@@ -1091,8 +1160,10 @@ Board.prototype.updateHistoryNavigationControls = function () {
   const historyIndex = this.positionHistoryIndex >= 0 ? this.positionHistoryIndex : 0;
   const lastIndex = hasHistory ? this.positionHistory.length - 1 : 0;
 
+  $("#historyHomeBtn").prop("disabled", !hasHistory || historyIndex <= 0);
   $("#historyBackBtn").prop("disabled", !hasHistory || historyIndex <= 0);
   $("#historyForwardBtn").prop("disabled", !hasHistory || historyIndex >= lastIndex);
+  $("#historyEndBtn").prop("disabled", !hasHistory || historyIndex >= lastIndex);
 };
 
 Board.prototype.findPieceSnapshotDescriptor = function (piece) {
@@ -1146,7 +1217,103 @@ Board.prototype.captureCurrentPosition = function () {
     normalMovesCounter: window.normalMovesCounter || 0,
     lastPawnMoved: this.findPieceSnapshotDescriptor(window.lastPawnMoved),
     lastMove: cloneLastMoveSquares(this.pendingHistoryMove),
+    moveRecapIndex: this.moveRecap ? this.moveRecap.length - 1 : -1,
+    clockTimes: this.captureClockTimes(),
   };
+};
+
+Board.prototype.captureClockTimes = function () {
+  const remaining = function (timer) {
+    if (!timer || typeof timer.getRemainingMs != "function") return null;
+    const value = Number(timer.getRemainingMs());
+    return Number.isFinite(value) ? Math.max(0, value) : null;
+  };
+
+  return {
+    whiteMs: remaining(this.timerWhite),
+    blackMs: remaining(this.timerBlack),
+  };
+};
+
+Board.prototype.renderSnapshotClockTimes = function (snapshot) {
+  if (!snapshot || !snapshot.clockTimes || window.gameState == "playing") return;
+  const render = function (timer, value) {
+    if (!timer || typeof timer.renderMilliseconds != "function") return;
+    if (!Number.isFinite(Number(value))) return;
+    timer.renderMilliseconds(Number(value));
+  };
+
+  render(this.timerWhite, snapshot.clockTimes.whiteMs);
+  render(this.timerBlack, snapshot.clockTimes.blackMs);
+};
+
+Board.prototype.getCapturedPiecesForSnapshot = function (snapshot) {
+  const currentCounts = { white: {}, black: {} };
+  const startingCounts = { white: { Pawn: 8, Knight: 2, Bishop: 2, Rook: 2, Queen: 1, King: 1 }, black: { Pawn: 8, Knight: 2, Bishop: 2, Rook: 2, Queen: 1, King: 1 } };
+  (snapshot && snapshot.pieces ? snapshot.pieces : []).forEach(function (piece) {
+    if (!piece || !piece.color || !piece.type) return;
+    currentCounts[piece.color][piece.type] = (currentCounts[piece.color][piece.type] || 0) + 1;
+  });
+  const captured = { white: [], black: [] };
+  ["white", "black"].forEach(function (color) {
+    Object.keys(startingCounts[color]).forEach(function (type) {
+      const missing = Math.max(0, startingCounts[color][type] - (currentCounts[color][type] || 0));
+      for (let i = 0; i < missing; i++) captured[color].push(type);
+    });
+  });
+  return captured;
+};
+
+Board.prototype.updateCapturedPiecesDisplay = function (snapshot) {
+  snapshot = snapshot || this.captureCurrentPosition();
+  const captured = this.getCapturedPiecesForSnapshot(snapshot);
+  const material = { white: captured.black.reduce((s, t) => s + chessRecapPieceValue(t), 0), black: captured.white.reduce((s, t) => s + chessRecapPieceValue(t), 0) };
+  const boardRef = this;
+  ["white", "black"].forEach(function (color) {
+    const panel = boardRef.getVisualSideForColor(color) == "top" ? $("#capturedPiecesTop") : $("#capturedPiecesBottom");
+    const piecesTaken = color == "white" ? captured.black : captured.white;
+    const diff = material[color] - material[color == "white" ? "black" : "white"];
+    panel.removeClass("captured-pieces-white captured-pieces-black").addClass(`captured-pieces-${color}`);
+    panel.find(".captured-pieces-icons").html(piecesTaken.map((type) => `<i class="fas ${chessRecapPieceIcon(type)} captured-piece-icon" title="Captured ${type}"></i>`).join(""));
+    panel.find(".captured-pieces-score").text(diff > 0 ? `+${diff}` : "");
+  });
+};
+
+Board.prototype.describeMoveForRecap = function (moveDetails) {
+  if (!moveDetails) return "Move";
+  if (moveDetails.isCastling) return "Castled";
+  const from = typeof chessSquareFromCoords == "function" ? chessSquareFromCoords(moveDetails.from.x, moveDetails.from.y) : `${moveDetails.from.x},${moveDetails.from.y}`;
+  const to = typeof chessSquareFromCoords == "function" ? chessSquareFromCoords(moveDetails.to.x, moveDetails.to.y) : `${moveDetails.to.x},${moveDetails.to.y}`;
+  return `${moveDetails.pieceType || "Piece"} ${from} → ${to}${moveDetails.capturedType ? ` captured ${moveDetails.capturedType}` : ""}`;
+};
+
+Board.prototype.appendMoveRecapEntry = function () {
+  if (!this.lastMoveDetails) return;
+  const entry = Object.assign({}, this.lastMoveDetails, { index: this.positionHistory.length - 1, durationMs: Math.max(0, Date.now() - (this.lastMoveStartedAt || Date.now())) });
+  entry.annotation = this.describeMoveForRecap(entry);
+  this.moveRecap.push(entry);
+  this.lastMoveStartedAt = Date.now();
+  this.lastMoveDetails = null;
+};
+
+Board.prototype.recordEvaluationPoint = function (evaluation) {
+  if (!evaluation) return;
+  const evaluationIndex = Number.isInteger(evaluation.index)
+    ? evaluation.index
+    : this.positionHistoryIndex;
+  if (evaluationIndex < 0) return;
+  const point = Object.assign({}, evaluation, { index: evaluationIndex, timestamp: Date.now() });
+  const existingIndex = this.evaluationHistory.findIndex(function (entry) {
+    return entry && entry.index == evaluationIndex;
+  });
+  if (existingIndex == -1) {
+    this.evaluationHistory.push(point);
+  } else {
+    this.evaluationHistory[existingIndex] = point;
+  }
+  this.evaluationHistory.sort(function (a, b) { return a.index - b.index; });
+  const snapshot = this.positionHistory && this.positionHistory[evaluationIndex];
+  if (snapshot) snapshot.evaluation = point;
 };
 
 Board.prototype.recordCurrentPosition = function (options) {
@@ -1170,11 +1337,21 @@ Board.prototype.recordCurrentPosition = function (options) {
 
   this.positionHistory.push(snapshot);
   this.positionHistoryIndex = this.positionHistory.length - 1;
+  if (!options.resetHistory) {
+    this.appendMoveRecapEntry();
+    snapshot.moveRecapIndex = this.moveRecap.length - 1;
+  }
   this.pendingHistoryMove = null;
   this.pendingHistoryTurn = null;
   this.isHistoryPreview = false;
   $("#game").removeClass("history-preview");
   this.updateHistoryNavigationControls();
+  this.updateCapturedPiecesDisplay(snapshot);
+  if (window.StockfishChess && typeof window.StockfishChess.analyze == "function") {
+    window.StockfishChess.analyze(Object.assign({}, snapshot, {
+      positionHistoryIndex: this.positionHistoryIndex,
+    }));
+  }
   return snapshot;
 };
 
@@ -1332,6 +1509,7 @@ Board.prototype.applyPositionSnapshot = function (snapshot) {
     return false;
   }
 
+  this.clearPremoveStack();
   this.cancelActiveDrag();
   this.disableDraggables($("i"));
   this.clearMoveHighlights();
@@ -1360,8 +1538,10 @@ Board.prototype.applyPositionSnapshot = function (snapshot) {
   };
   window.normalMovesCounter = snapshot.normalMovesCounter || 0;
   window.lastPawnMoved = this.findPieceFromSnapshotDescriptor(snapshot.lastPawnMoved);
+  this.renderSnapshotClockTimes(snapshot);
 
   this.highlightMoveSquares(snapshot.lastMove || []);
+  this.updateCapturedPiecesDisplay(snapshot);
   this.isHistoryPreview = this.positionHistoryIndex < this.positionHistory.length - 1;
   $("#game").toggleClass("history-preview", this.isHistoryPreview);
   $("#game").removeClass("role-black role-white").addClass(`role-${this.turn}`);
@@ -1377,6 +1557,14 @@ Board.prototype.applyPositionSnapshot = function (snapshot) {
   }
 
   this.updateHistoryNavigationControls();
+  if (snapshot.evaluation && typeof window.updateEvaluationBar == "function") {
+    window.updateEvaluationBar(Object.assign({}, snapshot.evaluation, { source: "history" }));
+  }
+  if (window.StockfishChess && typeof window.StockfishChess.analyze == "function") {
+    window.StockfishChess.analyze(Object.assign({}, snapshot, {
+      positionHistoryIndex: this.positionHistoryIndex,
+    }));
+  }
   return true;
 };
 
@@ -1763,15 +1951,6 @@ Board.prototype.showGameOverOverlay = function (resultContentHtml) {
     overlay.css("display", "none");
   }
 
-  function showResultHubAgain() {
-    if (!window.gameResultHubShowable || window.gameState == "playing") return;
-    window.gameResultHubDismissed = false;
-    overlay.css("display", "flex");
-    overlay.find("#main_pannnel").css("display", "none");
-    overlay.find("#loadding_pannnel").css("display", "none");
-    resultsPanel.css("display", "block");
-  }
-
   function stopShowingResultHub() {
     window.gameResultHubShowable = false;
     window.gameResultHubDismissed = false;
@@ -1779,8 +1958,32 @@ Board.prototype.showGameOverOverlay = function (resultContentHtml) {
   }
 
   window.hideGameResultHubForAnalysis = hideResultHubForAnalysis;
-  window.showGameResultHubAgain = showResultHubAgain;
+  window.showGameResultHubAgain = function () {};
   window.stopShowingGameResultHub = stopShowingResultHub;
+
+  function renderEvaluationDriftGraph() {
+    const points = (boardObject.evaluationHistory || []).slice().sort((a, b) => a.index - b.index);
+    const width = 420, height = 120;
+    if (!points.length) return '<div class="evaluation-drift-empty">No engine evaluation samples were recorded.</div>';
+    const maxIndex = Math.max(1, points.reduce((max, point) => Math.max(max, point.index || 0), 0));
+    const normalized = points.map(function (point) {
+      const cp = point.type == "mate" ? (point.whiteCp > 0 ? 10000 : -10000) : point.whiteCp;
+      const clamped = Math.max(-1000, Math.min(1000, cp || 0));
+      return { x: ((point.index || 0) / maxIndex) * width, y: height - ((clamped + 1000) / 2000) * height };
+    });
+    const line = normalized.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+    const boundary = normalized.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+    return `<svg class="evaluation-drift-graph" viewBox="0 0 ${width} ${height}" role="img" aria-label="Evaluation drift graph"><rect class="evaluation-drift-bg" x="0" y="0" width="${width}" height="${height}"></rect><polygon class="evaluation-drift-fill-black" points="0,0 ${boundary} ${width},0"></polygon><polygon class="evaluation-drift-fill-white" points="0,${height} ${boundary} ${width},${height}"></polygon><polyline class="evaluation-drift-line" points="${line}"></polyline><line class="evaluation-drift-mid" x1="0" y1="${height / 2}" x2="${width}" y2="${height / 2}"></line></svg>`;
+  }
+
+  function renderMoveRecap() {
+    const entries = boardObject.moveRecap || [];
+    if (!entries.length) return '<div class="game-recap-empty">No moves were recorded.</div>';
+    return entries.map(function (entry, index) {
+      const iconClass = chessRecapPieceIcon(entry.pieceType);
+      return `<button type="button" class="game-recap-move" data-history-index="${entry.index}"><span class="game-recap-move-number">${Math.floor(index / 2) + 1}${entry.color == "black" ? "..." : "."}</span><span class="game-recap-move-text"><i class="fas ${iconClass} game-recap-move-icon game-recap-move-icon-${entry.color}" aria-hidden="true"></i>${chessRecapEscape(entry.annotation)}</span><span class="game-recap-move-duration">${chessRecapFormatDuration(entry.durationMs)}</span></button>`;
+    }).join("");
+  }
 
   // Show overlay, hide main hub panel, show results panel
   overlay.css("display", "flex");
@@ -1799,22 +2002,23 @@ Board.prototype.showGameOverOverlay = function (resultContentHtml) {
         "  </div>" +
         "</div>" +
         '<div class="col-12" style="line-height:10px !important">&nbsp;</div>' +
-        '<div class="col-12">' +
-        "  <div class='d-flex justify-content-center'>" +
-        "    <div class='btn-group'>" +
-        "      <button id='closeResultsBtn' class='btn btn-outline-secondary btn-sm'>Close</button>" +
-        "      <button id='replayBtn' class='btn btn-outline-success btn-sm'>Restart</button>" +
-        "    </div>" +
-        "  </div>" +
-        "</div>" +
-        '<div class="col-12" style="line-height:10px !important">&nbsp;</div>' +
         "</div>"
     );
     overlay.append(resultsPanel);
   }
 
   overlay.find("#results_content").html(resultContentHtml);
+  $("#sideEvaluationDriftGraph").html(renderEvaluationDriftGraph());
+  $("#sideGameMoveRecapList").html(renderMoveRecap());
+  $("#sideGameAnalysisPanel").css("display", "block");
   resultsPanel.css("display", "block");
+
+  $("#sideGameAnalysisPanel, #sideGameAnalysisPanel .game-recap-move").off("click.gameRecap").on("click.gameRecap", function (event) { event.stopPropagation(); });
+  $("#sideGameAnalysisPanel .game-recap-move").off("click.gameRecapJump").on("click.gameRecapJump", function (event) {
+    event.preventDefault(); event.stopPropagation();
+    const index = Number($(this).attr("data-history-index"));
+    if (Number.isFinite(index)) { hideResultHubForAnalysis(); boardObject.previewPositionAt(index); }
+  });
 
   resultsPanel.find("#dismissResultsBtn").off("click").on("click", function (event) {
     event.preventDefault();
@@ -1822,16 +2026,18 @@ Board.prototype.showGameOverOverlay = function (resultContentHtml) {
     hideResultHubForAnalysis();
   });
 
-  // Close button: hide results and show main hub
-  resultsPanel.find("#closeResultsBtn").off("click").on("click", function () {
+  $("#sideExitGameBtn").off("click.gameRecapAction").on("click.gameRecapAction", function (event) {
+    event.preventDefault();
+    event.stopPropagation();
     stopShowingResultHub();
     resultsPanel.css("display", "none");
     overlay.css("display", "flex");
     overlay.find("#main_pannnel").css("display", "block");
   });
 
-  // Restart button: reset game and immediately start a new game
-  resultsPanel.find("#replayBtn").off("click").on("click", function () {
+  $("#sideRestartGameBtn").off("click.gameRecapAction").on("click.gameRecapAction", function (event) {
+    event.preventDefault();
+    event.stopPropagation();
     stopShowingResultHub();
     resultsPanel.css("display", "none");
     window.resetGameAndStartNew();
@@ -1839,31 +2045,11 @@ Board.prototype.showGameOverOverlay = function (resultContentHtml) {
 
   $(document)
     .off("click.gameResultHubToggle keydown.gameResultHubToggle")
-    .on("click.gameResultHubToggle", function (event) {
-      if (!window.gameResultHubShowable || !window.gameResultHubDismissed || window.gameState == "playing") return;
-
-      const target = event.target;
-      const isBoardClick = target && typeof target.closest == "function" && target.closest("#board, #boardArea");
-      const isExemptControl =
-        target &&
-        typeof target.closest == "function" &&
-        target.closest(
-          "button, .btn, #resizeToggleBtn, #perfectZoomBtn, #zoomOutBtn, #zoomInBtn, #fullscreenBtn, #historyBackBtn, #historyForwardBtn, .board-zoom-controls, .history-navigation-controls, input, select, textarea, label, a"
-        );
-
-      if (isBoardClick || !isExemptControl) {
-        showResultHubAgain();
-      }
-    })
     .on("keydown.gameResultHubToggle", function (event) {
       const isEscape = event.key == "Escape" || event.key == "Esc" || event.which == 27;
-      if (!isEscape || !window.gameResultHubShowable || window.gameState == "playing") return;
+      if (!isEscape || !window.gameResultHubShowable || window.gameResultHubDismissed || window.gameState == "playing") return;
       event.preventDefault();
-      if (window.gameResultHubDismissed || resultsPanel.css("display") == "none") {
-        showResultHubAgain();
-      } else {
-        hideResultHubForAnalysis();
-      }
+      hideResultHubForAnalysis();
     });
 };
 
@@ -1873,11 +2059,16 @@ Board.prototype.resetGame = function () {
   }
   this.finalizeGame({ type: "game_over", result: "draw", reason: "Game reset" });
   this.positionHistory = [];
+  this.moveRecap = [];
+  this.evaluationHistory = [];
   this.positionHistoryIndex = -1;
   this.isHistoryPreview = false;
+  $("#sideGameAnalysisPanel").css("display", "none");
+  $("#sideEvaluationDriftGraph, #sideGameMoveRecapList").empty();
   $("#game").removeClass("history-preview");
   this.pendingHistoryMove = null;
   this.pendingHistoryTurn = null;
+  this.clearPremoveStack();
   $(document).off("keydown.chessHistoryNavigation");
 
   if (this.timerWhite) {
@@ -1887,6 +2078,9 @@ Board.prototype.resetGame = function () {
   if (this.timerBlack) {
     this.timerBlack.stop();
     this.timerBlack = null;
+  }
+  if (typeof window.resetClockVisuals == "function") {
+    window.resetClockVisuals();
   }
 
   if (window.gameSocket && window.gameSocket.readyState === 1) {
@@ -2139,6 +2333,14 @@ Board.prototype.draggableOptions = function () {
         boardRef.resetPiecePosition(piece);
         return false;
       }
+
+      if (window.isGameOnline && boardRef.turn != piece.color && boardRef.premoveStack && boardRef.premoveStack.length) {
+        const key = boardRef.getPremovePieceKey(piece);
+        const visual = boardRef.premoveVisualPositions.get(key);
+        if (visual) {
+          boardRef.getSquare(visual.x, visual.y).append($(piece.element).detach());
+        }
+      }
     },
     drag: onPieceDrag,
     accept: "td",
@@ -2237,16 +2439,407 @@ Board.prototype.getActiveDraggableColor = function () {
   if (window.gameState != "playing" || this.isHistoryPreview) return null;
   if (window.humainIsUpgrading || $(".popover.show").length > 0) return null;
 
+  if (window.isGameOnline) {
+    return window.playAs || this.playAs || null;
+  }
+
   if (window.isGameVsBot) {
     return this.turn == "white" ? "white" : null;
   }
 
+  return this.turn;
+};
+
+Board.prototype.canQueuePremoveForPiece = function (piece) {
+  if (!piece || window.gameState != "playing" || this.isHistoryPreview) return false;
+  if (window.humainIsUpgrading || $(".popover.show").length > 0) return false;
+
   if (window.isGameOnline) {
     const playAs = window.playAs || this.playAs;
-    return playAs == this.turn ? this.turn : null;
+    return piece.color == playAs && this.turn != piece.color;
   }
 
-  return this.turn;
+  if (window.isGameVsBot) {
+    return piece.color == "white" && this.turn != "white";
+  }
+
+  return false;
+};
+
+Board.prototype.getPremoveVisualSquareForPiece = function (piece) {
+  if (!piece) return null;
+  const key = piece.premoveId || "";
+  return key && this.premoveVisualPositions ? this.premoveVisualPositions.get(key) || null : null;
+};
+
+Board.prototype.isPremoveDropChangingVisualSquare = function (piece, x, y) {
+  if (!piece) return false;
+  const visual = this.getPremoveVisualSquareForPiece(piece);
+  const from = visual || { x: piece.x, y: piece.y };
+  return from.x != x || from.y != y;
+};
+
+Board.prototype.getPremovePromotionPieceName = function () {
+  const selected = window.lastUpgradedPiece || window.selectedPromotionPiece || null;
+  return ["Queen", "Knight", "Rook", "Bishop"].indexOf(selected) == -1 ? null : selected;
+};
+
+Board.prototype.getPremoveExecutionPromotionPieceName = function () {
+  return this.getPremovePromotionPieceName() || "Queen";
+};
+
+Board.prototype.getPromotionChoices = function () {
+  return [
+    { piece: Queen, name: "Queen", btnClass: "btn-dark", icon: "fa-chess-queen" },
+    { piece: Knight, name: "Knight", btnClass: "btn-light", icon: "fa-chess-knight" },
+    { piece: Rook, name: "Rook", btnClass: "btn-dark", icon: "fa-chess-rook" },
+    { piece: Bishop, name: "Bishop", btnClass: "btn-light", icon: "fa-chess-bishop" },
+  ];
+};
+
+Board.prototype.setPremovePiecePreview = function (piece, promotionName) {
+  if (!piece || !piece.element) return;
+  const iconByName = {
+    Queen: "fa-chess-queen",
+    Knight: "fa-chess-knight",
+    Rook: "fa-chess-rook",
+    Bishop: "fa-chess-bishop",
+    Pawn: "fa-chess-pawn",
+  };
+  const icon = iconByName[promotionName] || iconByName.Pawn;
+  $(piece.element)
+    .removeClass("fa-chess-pawn fa-chess-queen fa-chess-knight fa-chess-rook fa-chess-bishop")
+    .addClass(icon);
+};
+
+Board.prototype.resetPremovePiecePreview = function (piece) {
+  if (!piece || piece.constructor.name != "Pawn") return;
+  this.setPremovePiecePreview(piece, "Pawn");
+};
+
+Board.prototype.showPremovePromotionPopover = function (piece, onSelect) {
+  if (!piece || !piece.element || typeof onSelect != "function") return false;
+  if (typeof $(".promotion-piece-popover").popover == "function") {
+    $(".promotion-piece-popover").popover("hide");
+  } else {
+    $(".promotion-piece-popover").remove();
+  }
+  window.humainIsUpgrading = true;
+  this.updateDraggables();
+
+  const boardRef = this;
+  let div = $("<div>");
+  div.addClass("promotion-choice-popover-body");
+  for (const choice of this.getPromotionChoices()) {
+    let btn = $(`<button class="btn ${choice.btnClass} btn-select-piece">
+                  <i class="fas ${choice.icon}"></i>
+                </button>`);
+    btn.on("click", function () {
+      window.humainIsUpgrading = false;
+      $(piece.element).popover("dispose");
+      onSelect(choice.name);
+      boardRef.updateDraggables();
+    });
+    div.append(btn);
+  }
+
+  $(piece.element).popover({
+    placement: "bottom",
+    container: "body",
+    html: true,
+    template:
+      '<div class="popover promotion-piece-popover" role="tooltip"><div class="arrow"></div><div class="popover-body"></div></div>',
+    content: div,
+  });
+  $(piece.element).popover("show");
+  return true;
+};
+
+Board.prototype.restorePremovePieceElementsToActualSquares = function () {
+  for (const piece of this.pieces || []) {
+    if (!piece || !piece.element) continue;
+    const key = piece.premoveId || "";
+    if (!key || !this.premoveVisualPositions || !this.premoveVisualPositions.has(key)) continue;
+    const square = this.isInsideBoard(piece.x, piece.y) ? this.getSquare(piece.x, piece.y) : null;
+    if (square && square.length && !$.contains(square[0], piece.element)) {
+      square.append($(piece.element).detach());
+    }
+    this.resetPiecePosition(piece);
+  }
+};
+
+Board.prototype.restoreSinglePremovePieceElementToActualSquare = function (piece) {
+  if (!piece || !piece.element) return;
+  const square = this.isInsideBoard(piece.x, piece.y) ? this.getSquare(piece.x, piece.y) : null;
+  if (square && square.length && !$.contains(square[0], piece.element)) {
+    square.append($(piece.element).detach());
+  }
+  this.resetPiecePosition(piece);
+};
+
+Board.prototype.withPremoveVirtualPiecePositions = function (callback) {
+  if (typeof callback != "function") return false;
+  const boardRef = this;
+  const originalPieceAtSquare = this.pieceAtSquare;
+
+  this.pieceAtSquare = function (x, y) {
+    for (const piece of boardRef.pieces) {
+      if (!piece) continue;
+      const key = piece.premoveId || "";
+      const visual = key ? boardRef.premoveVisualPositions.get(key) : null;
+      if (visual && visual.x == x && visual.y == y) {
+        return piece;
+      }
+    }
+
+    const actualPiece = originalPieceAtSquare.call(boardRef, x, y);
+    if (!actualPiece) return null;
+    const actualKey = actualPiece.premoveId || "";
+    return actualKey && boardRef.premoveVisualPositions.has(actualKey) ? null : actualPiece;
+  };
+
+  try {
+    return callback();
+  } finally {
+    this.pieceAtSquare = originalPieceAtSquare;
+  }
+};
+
+Board.prototype.isPremoveShapeLegal = function (piece, fromX, fromY, toX, toY) {
+  if (!piece || !this.isInsideBoard(fromX, fromY) || !this.isInsideBoard(toX, toY)) return false;
+  if (fromX == toX && fromY == toY) return false;
+  const dx = toX - fromX;
+  const dy = toY - fromY;
+  const absDx = Math.abs(dx);
+  const absDy = Math.abs(dy);
+  const type = piece.constructor.name;
+
+  if (type == "King" && fromY == 5 && fromX == toX && (Math.abs(dy) == 2 || toY == 1 || toY == 8)) {
+    return true;
+  }
+
+  if (type == "Pawn") {
+    const forward = piece.color == "white" ? -1 : 1;
+    if (dy == 0 && dx == forward) return true;
+    if (dy == 0 && dx == 2 * forward && !piece.firstMoveDone) return true;
+    if (Math.abs(dy) == 1 && dx == forward) return true;
+    return false;
+  }
+
+  if (type == "Knight") return (absDx == 2 && absDy == 1) || (absDx == 1 && absDy == 2);
+  if (type == "Bishop") return absDx == absDy;
+  if (type == "Rook") return dx == 0 || dy == 0;
+  if (type == "Queen") return dx == 0 || dy == 0 || absDx == absDy;
+  if (type == "King") return absDx <= 1 && absDy <= 1;
+  return false;
+};
+
+Board.prototype.clearPremoveStack = function () {
+  this.isExecutingPremoveStack = false;
+  if (this.premoveVisualPositions && this.premoveVisualPositions.size) {
+    for (const piece of this.pieces || []) {
+      if (!piece || !piece.element) continue;
+      const key = piece.premoveId || "";
+      if (key && this.premoveVisualPositions.has(key)) {
+        const square = this.isInsideBoard(piece.x, piece.y) ? this.getSquare(piece.x, piece.y) : null;
+        if (square && square.length && !$.contains(square[0], piece.element)) {
+          square.append($(piece.element).detach());
+        }
+        this.resetPiecePosition(piece);
+      }
+      this.resetPremovePiecePreview(piece);
+    }
+  }
+  window.humainIsUpgrading = false;
+  this.premoveStack = [];
+  this.premoveVisualPositions = new Map();
+  try {
+    if (typeof $("i").popover == "function") {
+      $("i").popover("dispose");
+    }
+  } catch (e) {}
+  $(".promotion-piece-popover").remove();
+  $("#game").removeClass("premove-active");
+  $("#board td").removeClass("premove-trail premove-origin premove-destination premove-current-piece premove-occupied-destination");
+  $("#board i").removeClass("premove-own-piece premove-ghost-piece premove-faded-piece premove-capture-top").css({ top: "0px", left: "0px", zIndex: "" });
+};
+
+Board.prototype.renderPremoveVisuals = function () {
+  $("#board td").removeClass("premove-trail premove-origin premove-destination premove-current-piece premove-occupied-destination");
+  $("#board i").removeClass("premove-own-piece premove-ghost-piece premove-faded-piece premove-capture-top").css({ top: "0px", left: "0px", zIndex: "" });
+
+  if (!this.premoveStack || !this.premoveStack.length) {
+    $("#game").removeClass("premove-active");
+    return;
+  }
+
+  $("#game").addClass("premove-active");
+  const playAs = window.playAs || this.playAs;
+
+  for (const item of this.premoveStack) {
+    this.getSquare(item.fromX, item.fromY).addClass("premove-trail premove-origin");
+    const destinationX = item.visualToX || item.toX;
+    const destinationY = item.visualToY || item.toY;
+    const destinationSquare = this.getSquare(destinationX, destinationY).addClass("premove-trail premove-destination");
+    const occupant = this.pieceAtSquare(destinationX, destinationY);
+    if (occupant && occupant.element && occupant.premoveId != item.key) {
+      destinationSquare.addClass("premove-occupied-destination");
+      $(occupant.element).addClass("premove-faded-piece");
+    }
+  }
+
+  for (const piece of this.pieces) {
+    if (!piece || piece.color != playAs || !piece.element) continue;
+    const key = this.getPremovePieceKey(piece);
+    const visual = this.premoveVisualPositions.get(key);
+    const square = visual ? this.getSquare(visual.x, visual.y) : this.getSquare(piece.x, piece.y);
+    $(piece.element).addClass("premove-own-piece");
+    square.addClass("premove-current-piece");
+    if (visual) {
+      const occupyingPiece = this.pieceAtSquare(visual.x, visual.y);
+      const isCaptureVisual = occupyingPiece && occupyingPiece != piece && occupyingPiece.color != piece.color;
+      $(piece.element)
+        .stop(true, true)
+        .css({ top: "0px", left: "0px", transition: "none", transform: "none" })
+        .detach()
+        .appendTo(square)
+        .addClass("premove-ghost-piece")
+        .toggleClass("premove-capture-top", !!isCaptureVisual)
+        .css("zIndex", isCaptureVisual ? 80 : "");
+    }
+  }
+};
+
+Board.prototype.getPremovePieceKey = function (piece) {
+  if (!piece) return "";
+  if (!piece.premoveId) {
+    piece.premoveId = `pm-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+  return piece.premoveId;
+};
+
+Board.prototype.rebuildPremoveVisualPositionsFromStack = function () {
+  const visualPositions = new Map();
+
+  for (const item of this.premoveStack || []) {
+    if (!item || !item.key) continue;
+    visualPositions.set(item.key, {
+      x: item.visualToX || item.toX,
+      y: item.visualToY || item.toY,
+    });
+  }
+
+  this.premoveVisualPositions = visualPositions;
+};
+
+Board.prototype.queuePremove = function (piece, x, y) {
+  if (!piece || !this.isInsideBoard(x, y)) return false;
+  const playAs = window.playAs || this.playAs;
+  if (!this.canQueuePremoveForPiece(piece)) {
+    this.resetPiecePosition(piece);
+    return false;
+  }
+
+  const key = this.getPremovePieceKey(piece);
+  const visualFrom = this.premoveVisualPositions.get(key) || { x: piece.x, y: piece.y };
+  const occupiedByVisualPiece = Array.from(this.premoveVisualPositions.entries()).some(function (entry) {
+    return entry[0] != key && entry[1].x == x && entry[1].y == y;
+  });
+  if (occupiedByVisualPiece || !this.isPremoveShapeLegal(piece, visualFrom.x, visualFrom.y, x, y)) {
+    this.resetPiecePosition(piece);
+    this.renderPremoveVisuals();
+    return false;
+  }
+
+  const reachesPromotionRank = piece.constructor.name == "Pawn" && ((piece.color == "white" && x == 1) || (piece.color == "black" && x == 8));
+  const isCastlingDestination = piece.constructor.name == "King" && visualFrom.y == 5 && visualFrom.x == x && Math.abs(y - visualFrom.y) == 2;
+  const executeToY = isCastlingDestination ? (y > visualFrom.y ? 8 : 1) : y;
+
+  const enqueue = (promotion) => {
+    this.premoveStack.push({ key: key, fromX: visualFrom.x, fromY: visualFrom.y, toX: executeToY == y ? x : visualFrom.x, toY: executeToY, visualToX: x, visualToY: y, promotion: promotion || null });
+    this.premoveVisualPositions.set(key, { x: x, y: y });
+    if (promotion) {
+      this.setPremovePiecePreview(piece, promotion);
+    }
+    this.renderPremoveVisuals();
+  };
+
+  if (reachesPromotionRank) {
+    this.resetPiecePosition(piece);
+    return this.showPremovePromotionPopover(piece, function (promotionName) {
+      enqueue(promotionName);
+    });
+  }
+
+  enqueue(null);
+  return true;
+};
+
+Board.prototype.canExecutePremove = function (item) {
+  if (!item || window.gameState != "playing") return false;
+  const playAs = window.isGameOnline ? (window.playAs || this.playAs) : "white";
+  if (this.turn != playAs) return false;
+  const piece = this.pieces.find((p) => p && this.getPremovePieceKey(p) == item.key);
+  if (!piece || piece.color != playAs) return false;
+  if (piece.x != item.fromX || piece.y != item.fromY) return false;
+  const targetPiece = this.pieceAtSquare(item.toX, item.toY);
+  const isCastlingPremove = piece.constructor.name == "King" && targetPiece && targetPiece.color == piece.color && targetPiece.constructor.name == "Rook";
+  if (targetPiece && targetPiece != piece && targetPiece.color == piece.color && !isCastlingPremove) return false;
+  return piece.isLegal(this, item.toX, item.toY) && (isCastlingPremove || !this.isCheckIfMovePlayed(piece, item.toX, item.toY));
+};
+
+Board.prototype.tryExecutePremoveStack = function () {
+  if (!this.premoveStack || !this.premoveStack.length || this.isExecutingPremoveStack) return false;
+  this.isExecutingPremoveStack = true;
+  this.updateDraggables(true);
+
+  const next = this.premoveStack[0];
+  if (!this.canExecutePremove(next)) {
+    this.isExecutingPremoveStack = false;
+    this.rebuildPremoveVisualPositionsFromStack();
+    this.renderPremoveVisuals();
+    if (window.gameState == "playing") {
+      this.updateDraggables(true);
+    }
+    return false;
+  }
+
+  const piece = this.pieces.find((p) => p && this.getPremovePieceKey(p) == next.key);
+  if (piece && piece.element) {
+    this.resetPremovePiecePreview(piece);
+  }
+
+  const willPromote = next.promotion || (() => {
+    const pendingPiece = this.pieces.find((p) => p && this.getPremovePieceKey(p) == next.key);
+    return pendingPiece && pendingPiece.constructor.name == "Pawn" &&
+      ((pendingPiece.color == "white" && next.toX == 1) || (pendingPiece.color == "black" && next.toX == 8));
+  })();
+  if (willPromote) {
+    window.lastUpgradedPiece = next.promotion || this.getPremoveExecutionPromotionPieceName();
+  }
+
+  // The piece is already rendered at the final square of its premove chain.
+  // Execute the authoritative move without visibly replaying it from the
+  // current board position.
+  const moved = makeMove(this, next.fromX, next.fromY, next.toX, next.toY, { animate: false });
+  if (willPromote && !moved) {
+    window.lastUpgradedPiece = false;
+    if (piece) this.resetPremovePiecePreview(piece);
+  }
+
+  if (moved) {
+    this.premoveStack.shift();
+    this.rebuildPremoveVisualPositionsFromStack();
+  }
+
+  if (!this.premoveStack.length) {
+    this.clearPremoveStack();
+  } else {
+    this.isExecutingPremoveStack = false;
+    this.renderPremoveVisuals();
+    this.updateDraggables(true);
+  }
+  return moved;
 };
 
 Board.prototype.updateDraggables = function () {
@@ -2338,9 +2931,13 @@ Board.prototype.moveTo = function (piece, square) {
   const moveOptions = arguments[2] || {};
   const shouldAnimate = moveOptions.animate === true;
   const originSquare = $(piece.element).parent("td");
-  const originCoordinates = originSquare.length
-    ? this.coordinatesForSquare(originSquare)
-    : { x: piece.x, y: piece.y };
+  const hasAuthoritativeOrigin =
+    this.isInsideBoard(moveOptions.fromX, moveOptions.fromY);
+  const originCoordinates = hasAuthoritativeOrigin
+    ? { x: Number(moveOptions.fromX), y: Number(moveOptions.fromY) }
+    : originSquare.length
+      ? this.coordinatesForSquare(originSquare)
+      : { x: piece.x, y: piece.y };
 
   const originRect =
     originSquare[0] && typeof originSquare[0].getBoundingClientRect == "function"
@@ -2355,8 +2952,13 @@ Board.prototype.moveTo = function (piece, square) {
     top: "0px",
     left: "0px",
   });
-  let oldPiece = ($(square).find("i") ?? { data: () => {} }).data("piece");
-  let oldIndex = this.pieces.indexOf(oldPiece);
+  // The DOM may intentionally show this player's future premove position.
+  // Captures and castling must therefore use the board model captured before
+  // the moving piece's coordinates changed, never the elements in the square.
+  let oldPiece = getAuthoritativeMoveTarget(this.pieces, piece, moveOptions);
+  // Array#indexOf(null) would match any empty slot left by an earlier capture.
+  // Only a real authoritative target can have a capture index.
+  let oldIndex = oldPiece ? this.pieces.indexOf(oldPiece) : -1;
   const isCastlingMove =
     oldPiece &&
     piece.color == oldPiece.color &&
@@ -2368,6 +2970,14 @@ Board.prototype.moveTo = function (piece, square) {
     (piece.constructor.name == "Pawn" || oldIndex != -1 || moveOptions.isCapture);
 
   this.pendingHistoryTurn = moveOptions.turnAfterMove || null;
+  this.lastMoveDetails = {
+    color: piece.color,
+    pieceType: piece.constructor.name,
+    from: { x: originCoordinates.x, y: originCoordinates.y },
+    to: { x: piece.x, y: piece.y },
+    capturedType: oldPiece && oldPiece.color != piece.color ? oldPiece.constructor.name : (moveOptions.isCapture ? "Pawn" : null),
+    isCastling: isCastlingMove,
+  };
 
   if (isCastlingMove) {
     const rookOrigin = { x: oldPiece.x, y: oldPiece.y };
@@ -2436,9 +3046,11 @@ Board.prototype.moveTo = function (piece, square) {
     if (oldIndex != -1 || moveOptions.isCapture) {
       if (oldIndex != -1) {
         this.pieces[oldIndex] = null;
+        if (oldPiece.element) {
+          $(oldPiece.element).detach();
+        }
       }
       playChessSound(eat);
-      $(square).empty();
     } else if (!moveOptions.deferMoveSound) {
       if (typeof playMoveSoundWhenSettled == "function") {
         playMoveSoundWhenSettled();
@@ -2474,3 +3086,7 @@ Board.prototype.moveTo = function (piece, square) {
     this.movesCounter++;
   }
 };
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { Board, getAuthoritativeMoveTarget };
+}

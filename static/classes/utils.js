@@ -474,11 +474,32 @@ function initHtmlBoard(board, FLIP = false) {
   }
 }
 
+function cancelActivePremoves() {
+  const activeBoard = window.board || (typeof board != "undefined" ? board : null);
+  if (activeBoard && activeBoard.premoveStack && activeBoard.premoveStack.length && typeof activeBoard.clearPremoveStack == "function") {
+    activeBoard.clearPremoveStack();
+    if (typeof activeBoard.cancelActiveDrag == "function") {
+      activeBoard.cancelActiveDrag();
+    }
+    return true;
+  }
+  return false;
+}
+
+$(document).on("keydown.cancelPremoves", function (event) {
+  const isEscape = event.key == "Escape" || event.key == "Esc" || event.which == 27;
+  if (isEscape && cancelActivePremoves()) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+});
+
 function onPieceDrag(e, ui) {
   if (!isGamePlaying()) {
     dragStart = false;
     setResizeToggleDraggingState(false);
     $(".possibleMove").removeClass("possibleMove");
+
     resetDraggedPiece(ui);
     return false;
   }
@@ -500,6 +521,11 @@ function onPieceDrag(e, ui) {
 
     if (!piece || !activeBoard) {
       return false;
+    }
+
+    if (activeBoard.canQueuePremoveForPiece && activeBoard.canQueuePremoveForPiece(piece)) {
+      $(".possibleMove").removeClass("possibleMove");
+      return;
     }
 
     for (let x = 1; x <= 8; x++) {
@@ -548,6 +574,7 @@ $("body").on("click", function (e) {
     isRightMB = e.button == 2;
 
   if (isRightMB) {
+    cancelActivePremoves();
     $(".ui-draggable-dragging").css({
       top: "0px",
       left: "0px",
@@ -563,6 +590,15 @@ function diff(num1, num2) {
   }
 }
 
+function resetClockVisuals(display) {
+  const clocks = display ? $(display) : $("#WhiteTimer, #BlackTimer");
+  if (clocks && typeof clocks.removeClass == "function") {
+    clocks.removeClass("low-on-time");
+  }
+}
+
+window.resetClockVisuals = resetClockVisuals;
+
 function startTimer(seconds, oncomplete, display) {
   let timer,
     isRunning = false,
@@ -571,6 +607,10 @@ function startTimer(seconds, oncomplete, display) {
     gameStartTime = getTimerNow(),
     ms = sanitizeTimerSeconds(seconds) * 1000,
     obj = {};
+
+  // A newly-created clock must never inherit warning styling from the
+  // previous game or from an expired timer that used the same DOM element.
+  resetClockVisuals(display);
 
   function getTimerNow() {
     const now = window.estimatedServerTime ? window.estimatedServerTime() : new Date().getTime();
@@ -641,6 +681,14 @@ function startTimer(seconds, oncomplete, display) {
     isFinished = true;
   };
 
+  obj.getRemainingMs = function () {
+    return getRemainingMs();
+  };
+
+  obj.renderMilliseconds = function (value) {
+    renderTime(Number(value));
+  };
+
   obj.step = function () {
     if (isFinished) return 0;
     if (!isGamePlaying()) {
@@ -669,6 +717,7 @@ function startTimer(seconds, oncomplete, display) {
     // }
     if (now <= 0) {
       clearInterval(timer);
+      ms = 0;
       isFinished = true;
       isRunning = false;
       obj.resume = function () {};

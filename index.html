@@ -65,6 +65,11 @@
         </button>
       </div>
       <div id="boardArea">
+        <div id="evaluationBar" aria-label="Stockfish evaluation bar">
+          <div id="evaluationBlackFill"></div>
+          <div id="evaluationWhiteFill"></div>
+          <div id="evaluationScore">0.00</div>
+        </div>
         <table class="board" id="board">
           <tbody>
             <tr>
@@ -155,15 +160,42 @@
       <div id="sidePanelHolder">
         <div id="timerHolder">
           <div class="clock-block clock-block-black">
+            <div id="capturedPiecesTop" class="captured-pieces-panel captured-pieces-top" aria-label="Top side captured pieces">
+              <div class="captured-pieces-icons"></div>
+              <div class="captured-pieces-score"></div>
+            </div>
             <div id="BlackGameActions" class="clock-game-actions" data-action-color="black"></div>
             <div id="BlackTimer">05:00</div>
+          </div>
+          <div id="sideGameAnalysisPanel" class="game-recap-panel side-game-analysis-panel no-result-hub-toggle" aria-label="Post-game analysis" style="display:none;">
+            <div class="game-recap-actions" aria-label="Game result actions">
+              <button id="sideRestartGameBtn" type="button" class="game-recap-action game-recap-action-primary">Restart</button>
+              <button id="sideExitGameBtn" type="button" class="game-recap-action game-recap-action-secondary">Exit</button>
+            </div>
+            <div class="game-recap-title">Evaluation drift</div>
+            <div id="sideEvaluationDriftGraph"></div>
+            <div class="game-recap-title">Game recap</div>
+            <div id="sideGameMoveRecapList" class="game-move-recap-list"></div>
           </div>
           <div class="clock-block clock-block-white">
             <div id="WhiteTimer">05:00</div>
             <div id="WhiteGameActions" class="clock-game-actions" data-action-color="white"></div>
+            <div id="capturedPiecesBottom" class="captured-pieces-panel captured-pieces-bottom" aria-label="Bottom side captured pieces">
+              <div class="captured-pieces-icons"></div>
+              <div class="captured-pieces-score"></div>
+            </div>
           </div>
         </div>
         <div id="historyNavigationControls" aria-label="Position history navigation">
+          <button
+            id="historyHomeBtn"
+            type="button"
+            class="history-nav-button"
+            title="First position"
+            aria-label="First position"
+          >
+            <i class="fas fa-step-backward"></i>
+          </button>
           <button
             id="historyBackBtn"
             type="button"
@@ -181,6 +213,15 @@
             aria-label="Next position"
           >
             <i class="fas fa-angle-right"></i>
+          </button>
+          <button
+            id="historyEndBtn"
+            type="button"
+            class="history-nav-button"
+            title="Latest position"
+            aria-label="Latest position"
+          >
+            <i class="fas fa-step-forward"></i>
           </button>
         </div>
       </div>
@@ -288,6 +329,22 @@
 
           <div class="col-12" style="line-height: 10px !important">&nbsp;</div>
 
+          <div class="col-12" id="botOptionsPanel" style="display: none">
+            <div class="d-flex justify-content-center">
+              <div class="input-group">
+                <select id="botTypeSelect" class="form-control" aria-label="Choose bot strength">
+                  <option value="weak" selected>Weak Bot</option>
+                  <option value="stockfish">Super Strong Bot (Stockfish)</option>
+                </select>
+                <div class="input-group-append">
+                  <span class="input-group-text">Bot strength</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-12" style="line-height: 10px !important">&nbsp;</div>
+
           <div class="col-12">
             <div class="d-flex justify-content-center">
               <button onclick="initGame()" class="btn btn-dark btn-block">
@@ -320,6 +377,7 @@
     <script src="static/classes/utils.js"></script>
     <script src="static/classes/menu.js"></script>
     <script src="static/classes/board.js"></script>
+    <script src="static/classes/stockfish-service.js"></script>
     <script src="static/classes/action/bot.js"></script>
     <script src="static/classes/action/move.js"></script>
     <script src="static/classes/pieces/piece.js"></script>

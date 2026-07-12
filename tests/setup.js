@@ -17,6 +17,16 @@ global.navigator = dom.window.navigator;
 // ============================================================
 
 function $(selector) {
+  // Match real jQuery's behavior for existing jQuery objects and DOM nodes.
+  // Production board methods frequently call $(piece.element), so returning
+  // null here would prevent integration tests from exercising those methods.
+  if (selector && selector._element) {
+    return selector;
+  }
+  if (selector && selector.nodeType) {
+    return createjQueryObject(selector);
+  }
+
   // Handle element creation: $('<i class="fg-white"></i>')
   if (typeof selector === 'string' && selector.startsWith('<')) {
     const temp = document.createElement('div');

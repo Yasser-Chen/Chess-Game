@@ -38,6 +38,14 @@ function resetPieceElementPosition(piece) {
   });
 }
 
+function shouldAnimateMove(options) {
+  options = options || {};
+  if (options.animate === false) return false;
+  return options.animate === true ||
+    window.BotPlaying === true ||
+    window.isGameOnline === true;
+}
+
 function makeMove(board, x, y, newX, newY) {
   const options = arguments[5] || {};
   if (!board || window.gameState != "playing") {
@@ -59,6 +67,27 @@ function makeMove(board, x, y, newX, newY) {
     return false;
   }
 
+  if (board.isHistoryPreview && options.live !== false) {
+    const previewIndex = board.positionHistoryIndex;
+    const latestIndex = board.positionHistory ? board.positionHistory.length - 1 : -1;
+    const latestSnapshot = latestIndex >= 0 ? board.positionHistory[latestIndex] : null;
+    const focusNowAfterMove = options.focusNow !== false;
+
+    if (latestSnapshot && typeof board.applyPositionSnapshot == "function") {
+      board.positionHistoryIndex = latestIndex;
+      board.applyPositionSnapshot(latestSnapshot);
+      const moveWasPlayed = makeMove(board, x, y, newX, newY, Object.assign({}, options, { live: false }));
+
+      if (!focusNowAfterMove && previewIndex >= 0 && previewIndex < board.positionHistory.length - 1) {
+        board.previewPositionAt(previewIndex);
+      } else if (moveWasPlayed && board.positionHistory && board.positionHistory.length) {
+        board.previewPositionAt(board.positionHistory.length - 1);
+      }
+
+      return moveWasPlayed;
+    }
+  }
+
   let searchOld = board.pieceAtSquare(x, y);
   if (!searchOld) {
     console.warn("Ignored move because no piece exists on the source square", {
@@ -70,10 +99,7 @@ function makeMove(board, x, y, newX, newY) {
     return false;
   }
 
-  const shouldAnimateProgrammaticMove =
-    options.animate === true ||
-    window.BotPlaying === true ||
-    window.isGameOnline === true;
+  const shouldAnimateProgrammaticMove = shouldAnimateMove(options);
 
   let square = typeof board.getSquare == "function"
     ? board.getSquare(newX, newY)
@@ -113,7 +139,8 @@ function makeMove(board, x, y, newX, newY) {
     return false;
   }
 
-  window.isApplyingRemoteMove = true;
+  const previousIsApplyingRemoteMove = window.isApplyingRemoteMove;
+  window.isApplyingRemoteMove = options.remote === true;
   window.shouldAnimateProgrammaticMove = shouldAnimateProgrammaticMove;
   try {
     dropHandler.call(
@@ -122,11 +149,20 @@ function makeMove(board, x, y, newX, newY) {
       { draggable: $(searchOld.element) }
     );
   } finally {
-    window.isApplyingRemoteMove = false;
+    window.isApplyingRemoteMove = previousIsApplyingRemoteMove;
     window.shouldAnimateProgrammaticMove = false;
   }
 
   resetPieceElementPosition(searchOld);
+
+  if (
+    board.premoveStack &&
+    board.premoveStack.length &&
+    !board.isExecutingPremoveStack &&
+    typeof board.renderPremoveVisuals == "function"
+  ) {
+    board.renderPremoveVisuals();
+  }
 
   return (
     (searchOld.x == newX && searchOld.y == newY) ||
@@ -137,5 +173,5 @@ function makeMove(board, x, y, newX, newY) {
 
 // CommonJS export for Node.js testing
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { Move, makeMove };
+  module.exports = { Move, makeMove, shouldAnimateMove };
 }
