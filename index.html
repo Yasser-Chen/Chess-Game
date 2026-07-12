@@ -329,6 +329,35 @@
 
           <div class="col-12" style="line-height: 10px !important">&nbsp;</div>
 
+          <div class="col-12">
+            <div class="d-flex justify-content-center">
+              <div
+                id="playerColorOptions"
+                class="btn-group btn-group-toggle"
+                data-toggle="buttons"
+                aria-label="Choose your color"
+              >
+                <label class="btn btn-outline-secondary" title="White" aria-label="White">
+                  <input type="radio" name="player_color" value="white" aria-label="White" />
+                  <i class="fas fa-chess-king menu-color-icon menu-color-white" aria-hidden="true"></i>
+                  <span class="sr-only">White</span>
+                </label>
+                <label class="btn btn-outline-secondary active" title="Random" aria-label="Random">
+                  <input type="radio" name="player_color" value="random" aria-label="Random" checked />
+                  <span class="menu-color-icon menu-color-random" aria-hidden="true"></span>
+                  <span class="sr-only">Random</span>
+                </label>
+                <label class="btn btn-outline-secondary" title="Black" aria-label="Black">
+                  <input type="radio" name="player_color" value="black" aria-label="Black" />
+                  <i class="fas fa-chess-king menu-color-icon menu-color-black" aria-hidden="true"></i>
+                  <span class="sr-only">Black</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-12" style="line-height: 10px !important">&nbsp;</div>
+
           <div class="col-12" id="botOptionsPanel" style="display: none">
             <div class="d-flex justify-content-center">
               <div class="input-group">
@@ -359,9 +388,6 @@
 
     <script>
       window.STATIC_EXPORT = true;
-      const MY_USER_ID = "static-export-user";
-      // Static exports do not have Django server timestamps or WebSockets.
-      window.priority = Date.now();
     </script>
 
     <script src="static/jquery/jquery.js"></script>

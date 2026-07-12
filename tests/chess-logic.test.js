@@ -402,3 +402,45 @@ describe("draw counters", () => {
     expect(board.canClaimFiftyMoveDraw()).toBe(false);
   });
 });
+
+describe("bot player color", () => {
+  beforeEach(() => {
+    window.isGameOnline = false;
+    window.isGameVsBot = true;
+    window.gameState = "playing";
+    window.humainIsUpgrading = false;
+  });
+
+  test("choosing black gives the player control of black and the bot control of white", () => {
+    const blackPiece = new Rook(8, 1, "black");
+    const board = createRuleBoard([
+      blackPiece,
+      new King(8, 5, "white"),
+      new King(1, 5, "black"),
+    ], "black");
+    board.playAs = "black";
+    window.playAs = "black";
+
+    expect(board.getLocalActionColor()).toBe("black");
+    expect(board.getActiveDraggableColor()).toBe("black");
+    expect(board.getBotColor()).toBe("white");
+    expect(board.canColorAct("black")).toBe(true);
+    expect(board.canColorAct("white")).toBe(false);
+
+    board.turn = "white";
+    expect(board.getActiveDraggableColor()).toBeNull();
+    expect(board.canQueuePremoveForPiece(blackPiece)).toBe(true);
+  });
+
+  test("choosing white keeps white as the player and black as the bot", () => {
+    const board = createRuleBoard([
+      new King(8, 5, "white"),
+      new King(1, 5, "black"),
+    ]);
+    board.playAs = "white";
+    window.playAs = "white";
+
+    expect(board.getActiveDraggableColor()).toBe("white");
+    expect(board.getBotColor()).toBe("black");
+  });
+});

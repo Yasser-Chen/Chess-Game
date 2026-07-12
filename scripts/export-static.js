@@ -12,11 +12,7 @@ function buildStaticHtml(template) {
     // local assets must stay relative to index.html instead of starting at /.
     .replace(/href="\/static\//g, 'href="static/')
     .replace(/src="\/static\//g, 'src="static/')
-    // Replace Django-only template variables with deterministic frontend values.
-    .replace(/"\{\{\s*MY_USER_ID\s*\}\}"/g, '"static-export-user"')
-    .replace(/Number\("\{\{\s*server_time\s*\}\}"\)/g, "Date.now()")
-    .replace(/\{\{\s*MY_USER_ID\s*\}\}/g, "static-export-user")
-    .replace(/\{\{\s*server_time\s*\}\}/g, String(Date.now()));
+    .replace("window.STATIC_EXPORT = false;", "window.STATIC_EXPORT = true;");
 
   html = html.replace(
     /<input([\s\S]*?)name="mode_of_play"([\s\S]*?)value="online"([\s\S]*?)checked([\s\S]*?)\/>/,
@@ -36,16 +32,6 @@ function buildStaticHtml(template) {
   html = html.replace(
     /<label class="btn btn-outline-dark">/,
     '<label class="btn btn-outline-dark active">'
-  );
-
-  html = html.replace(
-    /<script>\s*const MY_USER_ID = "static-export-user";([\s\S]*?)window\.priority = Date\.now\(\);([\s\S]*?)<\/script>/,
-    `<script>
-      window.STATIC_EXPORT = true;
-      const MY_USER_ID = "static-export-user";
-      // Static exports do not have Django server timestamps or WebSockets.
-      window.priority = Date.now();
-    </script>`
   );
 
   if (/\{%|\{\{/.test(html)) {

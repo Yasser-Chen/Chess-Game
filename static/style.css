@@ -38,6 +38,62 @@ div#game.game-over .ui-draggable-dragging{
     padding-top: 3px!important;
 }
 
+#playerColorOptions .btn {
+    align-items: center;
+    display: inline-flex;
+    height: 42px;
+    justify-content: center;
+    width: 52px;
+}
+
+#playerColorOptions .btn:not(.active) {
+    background-color: #adb5bd;
+    border-color: #6c757d;
+}
+
+#playerColorOptions .btn.active {
+    background-color: #28a745;
+    border-color: #1e7e34;
+    box-shadow: 0 0 0 0.2rem rgba(40, 167, 69, 0.35);
+    position: relative;
+    z-index: 1;
+}
+
+#playerColorOptions .btn.disabled {
+    opacity: 0.4;
+}
+
+#playerColorOptions .btn.active.disabled,
+#playerColorOptions .btn.color-choice-forced {
+    opacity: 1;
+}
+
+#playerColorOptions.online-color-locked .btn {
+    cursor: not-allowed;
+}
+
+.menu-color-icon {
+    font-size: 1.35rem;
+}
+
+.menu-color-white {
+    color: #fff;
+    text-shadow: -1px -1px 0 #343a40, 1px -1px 0 #343a40, -1px 1px 0 #343a40, 1px 1px 0 #343a40;
+}
+
+.menu-color-random {
+    background: linear-gradient(90deg, #fff 50%, #111 50%);
+    border: 1px solid #555;
+    border-radius: 50%;
+    display: inline-block;
+    height: 1.2rem;
+    width: 1.2rem;
+}
+
+.menu-color-black {
+    color: #111;
+}
+
 #boardArea{
     position: relative;
     height: var(--board-size);

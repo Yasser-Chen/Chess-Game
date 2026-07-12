@@ -53,9 +53,9 @@ window.resetGameAndStartNew = function () {
   $("#board i").remove();
   window.board = null;
 
-  // Immediately start a new game using the last selected settings
-  // Use the stored playAs value (white or black) from the previous game
-  const playAs = window._lastPlayAs || "white";
+  // Immediately start a new game using the current color preference. Choosing
+  // Random rolls again for every local or bot game.
+  const playAs = resolveSelectedPlayerColor();
   const mode = $('input[name="mode_of_play"]:checked').val();
   if (mode == "vs_bot" && typeof window.setSelectedBotType == "function") {
     window.setSelectedBotType($("#botTypeSelect").val());
@@ -123,6 +123,7 @@ window.resetGameAndStartNew = function () {
   if (typeof board.updateGameActionControls == "function") {
     board.updateGameActionControls();
   }
+  startBotTurnIfNeeded(board);
 };
 
 // Global function to reset game and show hub
@@ -223,7 +224,58 @@ function updateBotOptionsVisibility() {
   $("#botOptionsPanel").toggle(isVsBot);
 }
 
-$(document).on("change", 'input[name="mode_of_play"]', updateBotOptionsVisibility);
+function updatePlayerColorOptions() {
+  const isOnline = $('input[name="mode_of_play"]:checked').val() == "online";
+  const colorInputs = $('input[name="player_color"]');
+  const colorLabels = $("#playerColorOptions label");
+
+  $("#playerColorOptions").toggleClass("online-color-locked", isOnline);
+  colorInputs.prop("disabled", isOnline);
+  colorLabels
+    .toggleClass("disabled", isOnline)
+    .removeClass("color-choice-forced")
+    .attr("aria-disabled", isOnline ? "true" : "false");
+
+  if (isOnline) {
+    colorInputs.prop("checked", false);
+    colorLabels.removeClass("active");
+    const randomInput = $('input[name="player_color"][value="random"]');
+    randomInput.prop("checked", true);
+    randomInput.closest("label").addClass("active color-choice-forced");
+  }
+}
+
+$("#playerColorOptions").on("click", ".btn", function (event) {
+  if (!$("#playerColorOptions").hasClass("online-color-locked")) return;
+
+  // Stop Bootstrap's button-toggle handler from clearing the forced Random
+  // selection when a disabled online color button is clicked.
+  event.preventDefault();
+  event.stopPropagation();
+});
+
+function resolveSelectedPlayerColor() {
+  const selected = $('input[name="player_color"]:checked').val();
+  if (selected == "white" || selected == "black") return selected;
+  return Math.random() < 0.5 ? "white" : "black";
+}
+
+window.resolveSelectedPlayerColor = resolveSelectedPlayerColor;
+
+function startBotTurnIfNeeded(gameBoard) {
+  if (!window.isGameVsBot || !gameBoard || gameBoard.turn == gameBoard.playAs) return;
+
+  setTimeout(function () {
+    if (window.board === gameBoard && window.gameState == "playing") {
+      botMove(gameBoard, gameBoard.turn);
+    }
+  }, 0);
+}
+
+$(document).on("change", 'input[name="mode_of_play"]', function () {
+  updateBotOptionsVisibility();
+  updatePlayerColorOptions();
+});
 
 $(document).on("change", "#botTypeSelect", function () {
   if (typeof window.setSelectedBotType == "function") {
@@ -235,6 +287,7 @@ $(document).on("change", "#botTypeSelect", function () {
 
 $(function () {
   updateBotOptionsVisibility();
+  updatePlayerColorOptions();
   if (typeof window.setSelectedBotType == "function") {
     window.setSelectedBotType($("#botTypeSelect").val());
   } else {
@@ -341,6 +394,7 @@ var createNewGame = (playAs) => {
   if (typeof board.updateGameActionControls == "function") {
     board.updateGameActionControls();
   }
+  startBotTurnIfNeeded(board);
 
   if (window.pendingGameOver && typeof board.applyGameOver == "function") {
     const pendingGameOver = window.pendingGameOver;
@@ -450,23 +504,9 @@ function initGame() {
           return;
         }
 
-        if (
-          !syncDone &&
-          ((data.type == "sync" && data.priority != priority) ||
-            data.type == "sync_accepted")
-        ) {
+        if (!syncDone && data.type == "match_found") {
           syncDone = true;
           clearInterval(searchingLoop);
-
-          window.gameSocket.send(
-            JSON.stringify({
-              chess_event: JSON.stringify({
-                type: "sync_accepted",
-                priority: priority,
-                date_start: data.date_start,
-              }),
-            })
-          );
 
           // Perform initial clock sync using the server-stamped sync message
           const t1 = Date.now();
@@ -493,28 +533,14 @@ function initGame() {
           $("#loading_chess_event").html("Match Found");
           setMatchmakingCancelEnabled(false);
 
-          if (data.type == "sync_accepted") {
-            //must play as black
-            setTimeout(function () {
-              createNewGame("black");
-
-              window.playAs = "black";
-              // Start periodic clock sync after game starts
-              if (window.isGameOnline && window.gameState == "playing") {
-                window.startClockSync();
-              }
-            }, diffTime);
-          } else {
-            setTimeout(function () {
-              createNewGame("white");
-
-              window.playAs = "white";
-              // Start periodic clock sync after game starts
-              if (window.isGameOnline && window.gameState == "playing") {
-                window.startClockSync();
-              }
-            }, diffTime);
-          }
+          setTimeout(function () {
+            createNewGame(data.color);
+            window.playAs = data.color;
+            // Start periodic clock sync after game starts
+            if (window.isGameOnline && window.gameState == "playing") {
+              window.startClockSync();
+            }
+          }, diffTime);
         } else if (window.gameState != "playing") {
           return;
         } else if (data.type == "upgrade") {
@@ -525,7 +551,7 @@ function initGame() {
         } else if (
           data.type != "upgrade" &&
           data.type != "sync" &&
-          data.type != "sync_accepted"
+          data.type != "match_found"
         ) {
           if (makeMove(board, data.x, data.y, data.newX, data.newY, { animate: true, remote: true }) && board && typeof board.tryExecutePremoveStack == "function") {
             board.tryExecutePremoveStack();
@@ -544,7 +570,6 @@ function initGame() {
             JSON.stringify({
               chess_event: JSON.stringify({
                 type: "sync",
-                priority: priority,
                 game_time_seconds: gameTimeSeconds,
                 increment_seconds: incrementSeconds,
               }),
@@ -553,7 +578,7 @@ function initGame() {
         }, 1000);
       }, 100);
     } else {
-      createNewGame();
+      createNewGame(resolveSelectedPlayerColor());
     }
   }
 }

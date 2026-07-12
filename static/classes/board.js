@@ -422,7 +422,7 @@ function Board(board, playAs) {
                 btn.on("click", function () {
                   window.humainIsUpgrading = false;
                   if (finishPromotion(choice.piece, choice.name) && window.isGameVsBot) {
-                    botMove(bigBoardObject, "black");
+                    botMove(bigBoardObject, bigBoardObject.getBotColor());
                   }
                 });
                 div.append(btn);
@@ -460,7 +460,7 @@ function Board(board, playAs) {
             if (window.BotPlaying) {
               window.BotPlaying = false;
             } else if (!window.humainIsUpgrading) {
-              botMove(bigBoardObject, "black");
+              botMove(bigBoardObject, bigBoardObject.getBotColor());
             }
           }
         }
@@ -659,7 +659,7 @@ Board.prototype.getLocalActionColor = function () {
   if (window.humainIsUpgrading || $(".popover.show").length > 0) return null;
 
   if (window.isGameVsBot) {
-    return "white";
+    return window.playAs || this.playAs || "white";
   }
 
   if (window.isGameOnline) {
@@ -669,12 +669,17 @@ Board.prototype.getLocalActionColor = function () {
   return this.turn;
 };
 
+Board.prototype.getBotColor = function () {
+  const playAs = window.playAs || this.playAs || "white";
+  return playAs == "white" ? "black" : "white";
+};
+
 Board.prototype.canColorAct = function (color) {
   if (!color || window.gameState != "playing" || this.isHistoryPreview) return false;
   if (window.humainIsUpgrading || $(".popover.show").length > 0) return false;
 
   if (window.isGameVsBot) {
-    return color == "white";
+    return color == (window.playAs || this.playAs || "white");
   }
 
   if (window.isGameOnline) {
@@ -2444,7 +2449,8 @@ Board.prototype.getActiveDraggableColor = function () {
   }
 
   if (window.isGameVsBot) {
-    return this.turn == "white" ? "white" : null;
+    const playAs = window.playAs || this.playAs || "white";
+    return this.turn == playAs ? playAs : null;
   }
 
   return this.turn;
@@ -2460,7 +2466,8 @@ Board.prototype.canQueuePremoveForPiece = function (piece) {
   }
 
   if (window.isGameVsBot) {
-    return piece.color == "white" && this.turn != "white";
+    const playAs = window.playAs || this.playAs || "white";
+    return piece.color == playAs && this.turn != playAs;
   }
 
   return false;
@@ -2777,7 +2784,9 @@ Board.prototype.queuePremove = function (piece, x, y) {
 
 Board.prototype.canExecutePremove = function (item) {
   if (!item || window.gameState != "playing") return false;
-  const playAs = window.isGameOnline ? (window.playAs || this.playAs) : "white";
+  const playAs = window.isGameOnline || window.isGameVsBot
+    ? (window.playAs || this.playAs || "white")
+    : "white";
   if (this.turn != playAs) return false;
   const piece = this.pieces.find((p) => p && this.getPremovePieceKey(p) == item.key);
   if (!piece || piece.color != playAs) return false;
