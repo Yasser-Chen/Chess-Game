@@ -5,7 +5,6 @@ This project implements all standard chess moves, rules, and basic checks. It fe
 ### To Do:
 
 - [Develop an AI opponent that makes optimal moves using deep learning techniques](https://github.com/Yasser-Chen/chessGame/issues/7).
-- [Implement premoves](https://github.com/Yasser-Chen/chessGame/issues/5).
 - [Secure the application against vulnerabilities](https://github.com/Yasser-Chen/chessGame/issues/4).
 - [Add login functionality and user color randomization](https://github.com/Yasser-Chen/chessGame/issues/2).
 
