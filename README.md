@@ -2,11 +2,9 @@
 
 This project implements all standard chess moves, rules, and basic checks. It features online 1v1 gameplay (open the application in two tabs to play against another person), local 1v1 on the same device, and player vs. bot modes.
 
-### To Do:
-
-- [Develop an AI opponent that makes optimal moves using deep learning techniques](https://github.com/Yasser-Chen/chessGame/issues/7).
+### To Do ( **For production usage** ):
 - [Secure the application against vulnerabilities](https://github.com/Yasser-Chen/chessGame/issues/4).
-- [Add login functionality and user color randomization](https://github.com/Yasser-Chen/chessGame/issues/2).
+- [Add login functionality](https://github.com/Yasser-Chen/chessGame/issues/2).
 
 ### Try the App:
 
