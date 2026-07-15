@@ -475,15 +475,73 @@ function initHtmlBoard(board, FLIP = false) {
 }
 
 function cancelActivePremoves() {
+  const options = arguments[0] || {};
   const activeBoard = window.board || (typeof board != "undefined" ? board : null);
-  if (activeBoard && activeBoard.premoveStack && activeBoard.premoveStack.length && typeof activeBoard.clearPremoveStack == "function") {
+  if (!activeBoard) return false;
+
+  const hasPremoves = !!(activeBoard.premoveStack && activeBoard.premoveStack.length);
+  const hasClickSelection = !!activeBoard.selectedClickPiece;
+  const hasActiveDrag = !!dragStart || $(".ui-draggable-dragging").length > 0;
+  const cancelledBoardInput = hasPremoves || hasClickSelection || hasActiveDrag;
+  const shouldClearThinkingHelpers = options.includeThinkingHelpers !== false;
+  const hasThinkingHelpers = shouldClearThinkingHelpers &&
+    typeof activeBoard.hasThinkingHelpers == "function" &&
+    activeBoard.hasThinkingHelpers();
+  const cancelled = cancelledBoardInput || hasThinkingHelpers;
+
+  if (hasPremoves && typeof activeBoard.clearPremoveStack == "function") {
     activeBoard.clearPremoveStack();
-    if (typeof activeBoard.cancelActiveDrag == "function") {
-      activeBoard.cancelActiveDrag();
-    }
-    return true;
   }
-  return false;
+
+  // Use the same cleanup path for a queued premove, click-to-move selection,
+  // or a piece currently held by the pointer. This makes right-click and the
+  // touch cancellation button behave identically.
+  if (cancelledBoardInput && typeof activeBoard.cancelActiveDrag == "function") {
+    activeBoard.cancelActiveDrag();
+    if (window.gameState == "playing" && typeof activeBoard.updateDraggables == "function") {
+      // Let jQuery UI finish its mouse-up cleanup before recreating a widget
+      // that was cancelled in the middle of a drag.
+      setTimeout(function () {
+        if (window.board === activeBoard && window.gameState == "playing") {
+          activeBoard.updateDraggables(true);
+        }
+      }, 0);
+    }
+  } else if (hasClickSelection && typeof activeBoard.clearClickMoveSelection == "function") {
+    activeBoard.clearClickMoveSelection();
+  }
+
+  if (hasThinkingHelpers && typeof activeBoard.clearThinkingHelpers == "function") {
+    activeBoard.clearThinkingHelpers();
+  }
+
+  return cancelled;
+}
+
+function getThinkingSquareFromMouseEvent(event) {
+  const originalEvent = event && (event.originalEvent || event);
+  let target = originalEvent && originalEvent.target ? originalEvent.target : event && event.target;
+  let square = target && typeof target.closest == "function" ? target.closest("#board td") : null;
+
+  if (
+    !square &&
+    originalEvent &&
+    Number.isFinite(originalEvent.clientX) &&
+    Number.isFinite(originalEvent.clientY) &&
+    typeof document != "undefined" &&
+    typeof document.elementFromPoint == "function"
+  ) {
+    target = document.elementFromPoint(originalEvent.clientX, originalEvent.clientY);
+    square = target && typeof target.closest == "function" ? target.closest("#board td") : null;
+  }
+  return square;
+}
+
+function getThinkingSquareCoordinates(activeBoard, event) {
+  const square = getThinkingSquareFromMouseEvent(event);
+  if (!activeBoard || !square || typeof activeBoard.coordinatesForSquare != "function") return null;
+  const coordinates = activeBoard.coordinatesForSquare(square);
+  return activeBoard.isInsideBoard(coordinates.x, coordinates.y) ? coordinates : null;
 }
 
 $(document).on("keydown.cancelPremoves", function (event) {
@@ -523,6 +581,10 @@ function onPieceDrag(e, ui) {
       return false;
     }
 
+    if (typeof activeBoard.clearClickMoveSelection == "function") {
+      activeBoard.clearClickMoveSelection();
+    }
+
     if (activeBoard.canQueuePremoveForPiece && activeBoard.canQueuePremoveForPiece(piece)) {
       $(".possibleMove").removeClass("possibleMove");
       return;
@@ -547,6 +609,44 @@ function onPieceStopDrag() {
   dragStart = false;
   setResizeToggleDraggingState(false);
   $(".possibleMove").removeClass("possibleMove");
+
+  const activeBoard = window.board || (typeof board != "undefined" ? board : null);
+  const piece = $(this).data("piece");
+  const premoveVisualWasCommitted = !!(piece && piece.premoveVisualCommittedDuringDrop);
+  if (piece && piece.premoveVisualCommittedDuringDrop) {
+    delete piece.premoveVisualCommittedDuringDrop;
+  }
+  if (activeBoard && piece && piece.restoreAfterActiveDrag) {
+    delete piece.restoreAfterActiveDrag;
+    const key = piece.premoveId || "";
+    const stillHasVisualPremove = key && activeBoard.premoveVisualPositions &&
+      activeBoard.premoveVisualPositions.has(key);
+    if (!stillHasVisualPremove && typeof activeBoard.restoreSinglePremovePieceElementToActualSquare == "function") {
+      activeBoard.restoreSinglePremovePieceElementToActualSquare(piece);
+    }
+  }
+
+  if (
+    !premoveVisualWasCommitted &&
+    activeBoard &&
+    activeBoard.premoveStack &&
+    activeBoard.premoveStack.length &&
+    !activeBoard.isExecutingPremoveStack &&
+    typeof activeBoard.renderPremoveVisuals == "function"
+  ) {
+    // jQuery UI invokes `stop` before removing ui-draggable-dragging. Render
+    // on the next task so renderPremoveVisuals no longer skips the held piece.
+    setTimeout(function () {
+      if (
+        window.board === activeBoard &&
+        activeBoard.premoveStack &&
+        activeBoard.premoveStack.length &&
+        !activeBoard.isExecutingPremoveStack
+      ) {
+        activeBoard.renderPremoveVisuals();
+      }
+    }, 0);
+  }
 }
 
 function comparingObjs(obj) {
@@ -562,24 +662,79 @@ function pushItem(item) {
     this.push(item);
   }
 }
-$("body").on("click", function (e) {
-  var isRightMB;
-  e = e || window.event;
+let rightMouseCancelledBoardInput = false;
 
-  if ("which" in e)
-    // Gecko (Firefox), WebKit (Safari/Chrome) & Opera
-    isRightMB = e.which == 3;
-  else if ("button" in e)
-    // IE, Opera
-    isRightMB = e.button == 2;
-
-  if (isRightMB) {
-    cancelActivePremoves();
-    $(".ui-draggable-dragging").css({
-      top: "0px",
-      left: "0px",
-    });
+$("body").on("mousedown.cancelBoardInput", function (event) {
+  const originalEvent = event && (event.originalEvent || event) || window.event;
+  const isRightMouseButton = originalEvent.which == 3 || originalEvent.button == 2;
+  const activeBoard = window.board || (typeof board != "undefined" ? board : null);
+  if (!isRightMouseButton) {
+    const isPrimaryMouseButton = originalEvent.which == 1 || originalEvent.button == 0;
+    if (
+      isPrimaryMouseButton &&
+      activeBoard &&
+      typeof activeBoard.hasThinkingHelpers == "function" &&
+      activeBoard.hasThinkingHelpers() &&
+      typeof activeBoard.clearThinkingHelpers == "function"
+    ) {
+      activeBoard.clearThinkingHelpers();
+    }
+    return;
   }
+
+  rightMouseCancelledBoardInput = cancelActivePremoves({ includeThinkingHelpers: false });
+  if (!rightMouseCancelledBoardInput && activeBoard && typeof activeBoard.beginThinkingGesture == "function") {
+    const coordinates = getThinkingSquareCoordinates(activeBoard, event);
+    if (coordinates) activeBoard.beginThinkingGesture(coordinates.x, coordinates.y);
+  }
+  event.preventDefault();
+  event.stopPropagation();
+});
+
+$("body").on("mousemove.thinkingHelpers", function (event) {
+  if (rightMouseCancelledBoardInput) return;
+  const activeBoard = window.board || (typeof board != "undefined" ? board : null);
+  if (!activeBoard || !activeBoard.thinkingGesture || typeof activeBoard.updateThinkingGesture != "function") return;
+  const originalEvent = event.originalEvent || event;
+  if (originalEvent.buttons !== undefined && !(originalEvent.buttons & 2)) {
+    activeBoard.cancelThinkingGesture();
+    return;
+  }
+  const coordinates = getThinkingSquareCoordinates(activeBoard, event);
+  if (coordinates) activeBoard.updateThinkingGesture(coordinates.x, coordinates.y);
+  event.preventDefault();
+});
+
+$("body").on("mouseup.thinkingHelpers", function (event) {
+  const originalEvent = event.originalEvent || event;
+  const isRightMouseButton = originalEvent.which == 3 || originalEvent.button == 2;
+  const activeBoard = window.board || (typeof board != "undefined" ? board : null);
+  if (!isRightMouseButton && !(activeBoard && activeBoard.thinkingGesture)) return;
+
+  if (rightMouseCancelledBoardInput) {
+    rightMouseCancelledBoardInput = false;
+  } else if (activeBoard && activeBoard.thinkingGesture && typeof activeBoard.finishThinkingGesture == "function") {
+    const coordinates = getThinkingSquareCoordinates(activeBoard, event);
+    if (coordinates) {
+      activeBoard.finishThinkingGesture(coordinates.x, coordinates.y);
+    } else {
+      activeBoard.cancelThinkingGesture();
+    }
+  }
+  event.preventDefault();
+  event.stopPropagation();
+});
+
+$("body").on("contextmenu.cancelBoardInput", function (event) {
+  event.preventDefault();
+  event.stopPropagation();
+});
+
+$("body").on("click.cancelBoardInput", "#cancelPremoveBtn", function (event) {
+  cancelActivePremoves();
+  event.preventDefault();
+  event.stopPropagation();
+  this.blur();
 });
 
 function diff(num1, num2) {
@@ -683,6 +838,14 @@ function startTimer(seconds, oncomplete, display) {
 
   obj.getRemainingMs = function () {
     return getRemainingMs();
+  };
+
+  obj.setRemainingMs = function (value) {
+    const parsed = Number(value);
+    ms = Number.isFinite(parsed) ? Math.max(0, parsed) : ms;
+    gameStartTime = getTimerNow();
+    isFinished = ms <= 0;
+    renderTime(ms);
   };
 
   obj.renderMilliseconds = function (value) {

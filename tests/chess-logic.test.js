@@ -249,6 +249,53 @@ describe("king safety", () => {
 });
 
 describe("terminal positions", () => {
+  test("the reported queen check can be blocked by the pawn's two-square move", () => {
+    // Full screenshot position: Qf5 checks Kh3 along f5-g4-h3. Every other
+    // white reply is covered, leaving the untouched g2 pawn's g4 block as the
+    // only legal move. This must fail against the pre-fix hasAuthMoves code.
+    const whiteKing = new King(6, 8, "white");
+    const gPawn = new Pawn(7, 7, "white");
+    const board = createRuleBoard([
+      new Rook(8, 8, "white"),   // Rh1
+      new Knight(8, 7, "white"), // Ng1
+      new Bishop(8, 6, "white"), // Bf1
+      gPawn,                      // Pg2
+      new Pawn(6, 3, "white"),   // Pc3
+      new Pawn(6, 1, "white"),   // Pa3
+      whiteKing,
+      new Pawn(5, 8, "white"),   // Ph4
+
+      new Rook(1, 8, "black"),   // Rh8
+      new Knight(1, 7, "black"), // Ng8
+      new King(1, 5, "black"),
+      new Bishop(1, 3, "black"), // Bc8
+      new Knight(1, 2, "black"), // Nb8
+      new Rook(1, 1, "black"),   // Ra8
+      new Pawn(2, 8, "black"),   // Ph7
+      new Pawn(2, 7, "black"),   // Pg7
+      new Pawn(2, 6, "black"),   // Pf7
+      new Pawn(2, 4, "black"),   // Pd7
+      new Pawn(2, 2, "black"),   // Pb7
+      new Pawn(2, 1, "black"),   // Pa7
+      new Pawn(3, 5, "black"),   // Pe6
+      new Bishop(3, 4, "black"), // Bd6
+      new Queen(4, 6, "black"),
+    ], "white");
+
+    expect(board.inCheck("white", whiteKing.x, whiteKing.y)).toBe(true);
+    expect(isFullyLegal(board, gPawn, 5, 7)).toBe(true);
+    expect(legalMovesFor(board, "white").map(({ piece, x, y }) => ({
+      piece: piece.constructor.name,
+      from: [piece.x, piece.y],
+      to: [x, y],
+    }))).toEqual([{
+      piece: "Pawn",
+      from: [7, 7],
+      to: [5, 7],
+    }]);
+    expect(board.hasAuthMoves("white")).toBe(true);
+  });
+
   test("detects Fool's Mate as checkmate using a real move sequence", () => {
     const board = createInitialBoard();
     playRuleMove(board, 7, 6, 6, 6); // f2-f3
@@ -292,6 +339,25 @@ describe("terminal positions", () => {
 });
 
 describe("special moves", () => {
+  test("en passant is illegal when removing both pawns exposes the king", () => {
+    const whiteKing = new King(4, 8, "white"); // Kh5
+    const whitePawn = new Pawn(4, 7, "white"); // Pg5
+    const blackPawn = new Pawn(4, 6, "black"); // Pf5, just moved two squares
+    const board = createRuleBoard([
+      whiteKing,
+      whitePawn,
+      blackPawn,
+      new Rook(4, 1, "black"), // Ra5
+      new King(1, 5, "black"),
+    ], "white");
+    window.lastPawnMoved = blackPawn;
+    blackPawn.cantEnpassant = false;
+
+    expect(whitePawn.isLegal(board, 3, 6)).toBe(true);
+    expect(board.isCheckIfMovePlayed(whitePawn, 3, 6)).toBe(true);
+    expect(isFullyLegal(board, whitePawn, 3, 6)).toBe(false);
+  });
+
   test("en passant exists only for the immediately eligible adjacent pawn", () => {
     const whitePawn = new Pawn(4, 4, "white");
     whitePawn.firstMoveDone = true;
@@ -335,6 +401,21 @@ describe("special moves", () => {
       king2, rook2, new King(1, 1, "black"), new Rook(1, 6, "black"),
     ]);
     expect(king2.isLegal(throughCheck, 8, 8)).toBe(false);
+  });
+
+  test("castling remains legal when only the rook's original square is attacked", () => {
+    const king = new King(8, 5, "white");
+    const rook = new Rook(8, 8, "white");
+    const board = createRuleBoard([
+      king,
+      rook,
+      new King(1, 1, "black"),
+      new Rook(1, 8, "black"),
+    ]);
+
+    expect(king.isLegal(board, 8, 8)).toBe(true);
+    expect(board.isCheckIfMovePlayed(king, 8, 8)).toBe(false);
+    expect(isFullyLegal(board, king, 8, 8)).toBe(true);
   });
 
   test("queenside castling may occur when b1 is attacked but c1 and d1 are safe", () => {
@@ -401,6 +482,39 @@ describe("draw counters", () => {
     board.movesCounter = 150;
     expect(board.canClaimFiftyMoveDraw()).toBe(false);
   });
+
+});
+
+describe("timeout material", () => {
+  test("losing on time is a draw when the opponent has only a king", () => {
+    const board = createRuleBoard([
+      new King(8, 5, "white"),
+      new Queen(7, 4, "white"),
+      new King(1, 5, "black"),
+    ]);
+    board.stallMate = jest.fn();
+    board.playerWon = jest.fn();
+
+    expect(board.finishGameOnTime("black")).toBe("draw");
+    expect(board.stallMate).toHaveBeenCalledWith(
+      "Draw by insufficient mating material"
+    );
+    expect(board.playerWon).not.toHaveBeenCalled();
+  });
+
+  test("losing on time remains a loss when the opponent has another piece", () => {
+    const board = createRuleBoard([
+      new King(8, 5, "white"),
+      new King(1, 5, "black"),
+      new Rook(1, 1, "black"),
+    ]);
+    board.stallMate = jest.fn();
+    board.playerWon = jest.fn();
+
+    expect(board.finishGameOnTime("black")).toBe("win");
+    expect(board.playerWon).toHaveBeenCalledWith("black", "on time");
+    expect(board.stallMate).not.toHaveBeenCalled();
+  });
 });
 
 describe("bot player color", () => {
@@ -428,7 +542,7 @@ describe("bot player color", () => {
     expect(board.canColorAct("white")).toBe(false);
 
     board.turn = "white";
-    expect(board.getActiveDraggableColor()).toBeNull();
+    expect(board.getActiveDraggableColor()).toBe("black");
     expect(board.canQueuePremoveForPiece(blackPiece)).toBe(true);
   });
 
@@ -442,5 +556,53 @@ describe("bot player color", () => {
 
     expect(board.getActiveDraggableColor()).toBe("white");
     expect(board.getBotColor()).toBe("black");
+
+    board.turn = "black";
+    expect(board.getActiveDraggableColor()).toBe("white");
+    expect(board.canQueuePremoveForPiece(board.pieces[0])).toBe(true);
+  });
+
+  test("offline local 1v1 keeps only the side to move draggable", () => {
+    window.isGameOnline = false;
+    window.isGameVsBot = false;
+    const whiteRook = new Rook(8, 1, "white");
+    const board = createRuleBoard([
+      whiteRook,
+      new King(8, 5, "white"),
+      new King(1, 5, "black"),
+    ], "black");
+
+    expect(board.getActiveDraggableColor()).toBe("black");
+    expect(board.canQueuePremoveForPiece(whiteRook)).toBe(false);
+  });
+});
+
+describe("captured piece display", () => {
+  beforeEach(() => {
+    document.body.innerHTML = `
+      <div id="capturedPiecesTop"><div class="captured-pieces-icons"></div><div class="captured-pieces-score"></div></div>
+      <div id="capturedPiecesBottom"><div class="captured-pieces-icons"></div><div class="captured-pieces-score"></div></div>
+    `;
+  });
+
+  test("playing Black keeps captures beside their owner and shows the captured color", () => {
+    const board = createInitialBoard();
+    board.isFlipped = true;
+    const missingWhiteQueen = board.pieces.find((piece) => piece.color == "white" && piece.constructor.name == "Queen");
+    const missingBlackRook = board.pieces.find((piece) => piece.color == "black" && piece.constructor.name == "Rook");
+    const snapshot = {
+      pieces: board.pieces
+        .filter((piece) => piece !== missingWhiteQueen && piece !== missingBlackRook)
+        .map((piece) => ({ color: piece.color, type: piece.constructor.name })),
+    };
+
+    board.updateCapturedPiecesDisplay(snapshot);
+
+    const blackPlayersPanel = document.querySelector("#capturedPiecesTop");
+    const whitePlayersPanel = document.querySelector("#capturedPiecesBottom");
+    expect(blackPlayersPanel.querySelector(".fa-chess-queen.captured-piece-white")).not.toBeNull();
+    expect(blackPlayersPanel.getAttribute("aria-label")).toBe("Black captured white pieces");
+    expect(whitePlayersPanel.querySelector(".fa-chess-rook.captured-piece-black")).not.toBeNull();
+    expect(whitePlayersPanel.getAttribute("aria-label")).toBe("White captured black pieces");
   });
 });

@@ -122,7 +122,11 @@ function makeMove(board, x, y, newX, newY) {
     targetBeforeMove.color == searchOld.color &&
     targetBeforeMove.constructor.name == "Rook";
 
-  resetPieceElementPosition(searchOld);
+  const preserveDraggedElement = options.preserveDraggedElement === true &&
+    $(searchOld.element).hasClass("ui-draggable-dragging");
+  if (!preserveDraggedElement) {
+    resetPieceElementPosition(searchOld);
+  }
 
   let dropHandler =
     typeof square.droppable == "function"
@@ -140,7 +144,9 @@ function makeMove(board, x, y, newX, newY) {
   }
 
   const previousIsApplyingRemoteMove = window.isApplyingRemoteMove;
+  const previousPreservedDraggedPiece = window.preserveDraggedMovePiece;
   window.isApplyingRemoteMove = options.remote === true;
+  window.preserveDraggedMovePiece = preserveDraggedElement ? searchOld : null;
   window.shouldAnimateProgrammaticMove = shouldAnimateProgrammaticMove;
   try {
     dropHandler.call(
@@ -150,10 +156,13 @@ function makeMove(board, x, y, newX, newY) {
     );
   } finally {
     window.isApplyingRemoteMove = previousIsApplyingRemoteMove;
+    window.preserveDraggedMovePiece = previousPreservedDraggedPiece;
     window.shouldAnimateProgrammaticMove = false;
   }
 
-  resetPieceElementPosition(searchOld);
+  if (!preserveDraggedElement) {
+    resetPieceElementPosition(searchOld);
+  }
 
   if (
     board.premoveStack &&

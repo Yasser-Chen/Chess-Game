@@ -54,6 +54,11 @@ function createjQueryObject(element) {
     _elements: [element],
     _data: {},
 
+    each(callback) {
+      callback.call(element, 0, element);
+      return obj;
+    },
+
     attr(name, value) {
       if (value !== undefined) {
         element.setAttribute(name, value);
@@ -63,12 +68,12 @@ function createjQueryObject(element) {
     },
 
     addClass(className) {
-      element.classList.add(className);
+      String(className).split(/\s+/).filter(Boolean).forEach(name => element.classList.add(name));
       return obj;
     },
 
     removeClass(className) {
-      element.classList.remove(className);
+      String(className).split(/\s+/).filter(Boolean).forEach(name => element.classList.remove(name));
       return obj;
     },
 
@@ -103,6 +108,14 @@ function createjQueryObject(element) {
         return obj;
       }
       return element.innerHTML;
+    },
+
+    text(content) {
+      if (content !== undefined) {
+        element.textContent = content;
+        return obj;
+      }
+      return element.textContent;
     },
 
     data(key, value) {
@@ -146,6 +159,13 @@ function createjQueryObject(element) {
     },
 
     detach() {
+      if (element.parentElement) {
+        element.parentElement.removeChild(element);
+      }
+      return obj;
+    },
+
+    remove() {
       if (element.parentElement) {
         element.parentElement.removeChild(element);
       }
@@ -222,13 +242,17 @@ function createjQueryObjectArray(elements) {
     },
     addClass(className) {
       for (const el of this._elements) {
-        if (el._element && el._element.classList) el._element.classList.add(className);
+        if (el._element && el._element.classList) {
+          String(className).split(/\s+/).filter(Boolean).forEach(name => el._element.classList.add(name));
+        }
       }
       return obj;
     },
     removeClass(className) {
       for (const el of this._elements) {
-        if (el._element && el._element.classList) el._element.classList.remove(className);
+        if (el._element && el._element.classList) {
+          String(className).split(/\s+/).filter(Boolean).forEach(name => el._element.classList.remove(name));
+        }
       }
       return obj;
     },
@@ -280,6 +304,17 @@ function createjQueryObjectArray(elements) {
       }
       return obj;
     },
+    text(content) {
+      if (content !== undefined) {
+        for (const el of this._elements) {
+          if (el._element) el._element.textContent = content;
+        }
+        return obj;
+      }
+      return this._elements[0] && this._elements[0]._element
+        ? this._elements[0]._element.textContent
+        : "";
+    },
     parent() {
       const results = [];
       for (const el of this._elements) {
@@ -311,6 +346,12 @@ function createjQueryObjectArray(elements) {
       return createjQueryObjectArray(filtered);
     },
     detach() {
+      for (const el of this._elements) {
+        if (el._element && el._element.parentElement) el._element.parentElement.removeChild(el._element);
+      }
+      return obj;
+    },
+    remove() {
       for (const el of this._elements) {
         if (el._element && el._element.parentElement) el._element.parentElement.removeChild(el._element);
       }

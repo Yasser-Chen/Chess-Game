@@ -2,6 +2,7 @@
 // GitHub's 100 MB file limit.
 const STOCKFISH_SCRIPT_PATH = "static/stockfish/stockfish-18-lite-single.js";
 const STOCKFISH_WASM_PATH = "static/stockfish/stockfish-18-lite-single.wasm";
+const STOCKFISH_SHARED_WORKER_PATH = "static/classes/stockfish-shared-worker.js";
 
 function buildStockfishWorkerUrl() {
   const scriptUrl = new URL(STOCKFISH_SCRIPT_PATH, window.location.href);
@@ -13,6 +14,95 @@ function buildStockfishWorkerUrl() {
   // "WASM streaming failed: TypeError: Failed to fetch".
   scriptUrl.hash = encodeURIComponent(wasmUrl.href);
   return scriptUrl.href;
+}
+
+function createSharedStockfishEngine() {
+  if (typeof SharedWorker == "undefined") return null;
+
+  const workerUrl = new URL(STOCKFISH_SHARED_WORKER_PATH, window.location.href);
+  const sharedWorker = new SharedWorker(workerUrl.href, "chess-stockfish");
+  const port = sharedWorker.port;
+  const engine = {
+    isShared: true,
+    onmessage: null,
+    onerror: null,
+    onmessageerror: null,
+    ready: false,
+    uciRequested: false,
+    readyRequested: false,
+    closed: false,
+  };
+
+  const emitLine = function (line) {
+    if (typeof engine.onmessage == "function") {
+      engine.onmessage({ data: line });
+    }
+  };
+
+  engine.postMessage = function (command) {
+    if (this.closed) return;
+    if (command == "uci") {
+      this.uciRequested = true;
+      if (this.ready) emitLine("uciok");
+      return;
+    }
+    if (command == "isready") {
+      this.readyRequested = true;
+      if (this.ready) emitLine("readyok");
+      return;
+    }
+    if (command == "stop") {
+      port.postMessage({ type: "cancel" });
+    }
+    // Engine-wide options are configured once by the broker. Forwarding them
+    // from every tab would let one page mutate another page's active search.
+  };
+
+  engine.startSearch = function (commands, priority) {
+    if (this.closed) return;
+    port.postMessage({
+      type: "search",
+      commands,
+      priority: priority == "bot" ? "bot" : "evaluation",
+    });
+  };
+
+  engine.terminate = function () {
+    if (this.closed) return;
+    this.closed = true;
+    try {
+      port.postMessage({ type: "close" });
+      port.close();
+    } catch (e) {
+      // The browser may already have detached this page's port.
+    }
+  };
+
+  port.onmessage = function (event) {
+    const message = event.data || {};
+    if (message.type == "ready") {
+      engine.ready = true;
+      if (engine.uciRequested) {
+        emitLine("uciok");
+      } else if (engine.readyRequested) {
+        emitLine("readyok");
+      }
+      return;
+    }
+    if (message.type == "line") {
+      emitLine(message.line);
+      return;
+    }
+    if (message.type == "error" && typeof engine.onerror == "function") {
+      engine.onerror({ message: message.message || "Shared Stockfish worker failed" });
+    }
+  };
+  port.onmessageerror = function (event) {
+    if (typeof engine.onmessageerror == "function") engine.onmessageerror(event);
+  };
+  port.start();
+  port.postMessage({ type: "connect" });
+  return engine;
 }
 
 function chessSquareFromCoords(x, y) {
@@ -131,8 +221,23 @@ function boardToFen(board) {
 
 function uciToMove(uci) {
   if (!uci || uci.length < 4) return null;
-  const from = coordsFromChessSquare(uci.slice(0, 2));
-  const to = coordsFromChessSquare(uci.slice(2, 4));
+  const fromSquare = uci.slice(0, 2);
+  let toSquare = uci.slice(2, 4);
+
+  // Stockfish uses standard UCI king destinations for castling (e1g1,
+  // e1c1, e8g8, e8c8). This board's move API represents castling by moving
+  // the king onto its rook, after which the drop handler places both pieces
+  // on their final squares. Translate only those four unambiguous moves.
+  const castlingRookSquares = {
+    e1g1: "h1",
+    e1c1: "a1",
+    e8g8: "h8",
+    e8c8: "a8",
+  };
+  toSquare = castlingRookSquares[`${fromSquare}${toSquare}`] || toSquare;
+
+  const from = coordsFromChessSquare(fromSquare);
+  const to = coordsFromChessSquare(toSquare);
   if (!from.y || !to.y || !from.x || !to.x) return null;
   return { x: from.x, y: from.y, newX: to.x, newY: to.y, promotion: uci[4] || null };
 }
@@ -148,6 +253,8 @@ function normalizeStockfishEvaluation(type, raw, activeColor, index) {
 function createStockfishService(name) {
   const service = {
     name: name || "stockfish",
+    isStockfishService: true,
+    activeOwner: null,
     engine: null,
     ready: false,
     enabled: false,
@@ -157,6 +264,7 @@ function createStockfishService(name) {
     pendingEval: null,
     evalQueue: [],
     lastFen: null,
+    sharedFallbackStarted: false,
   };
 
   service.post = function (command) {
@@ -164,10 +272,31 @@ function createStockfishService(name) {
     this.engine.postMessage(command);
   };
 
-  service.init = function () {
+  service.claim = function (owner) {
+    if (!owner) return false;
+    if (this.activeOwner === owner) return true;
+
+    // A new board generation supersedes any unfinished work from the previous
+    // one. Dispose the old worker before changing ownership so late cleanup
+    // from the old board cannot target the new worker.
+    if (this.activeOwner || this.engine) this.dispose();
+    this.activeOwner = owner;
+    return true;
+  };
+
+  service.init = function (forceDedicated) {
     if (this.engine || typeof Worker == "undefined") return;
     try {
-      this.engine = new Worker(buildStockfishWorkerUrl());
+      if (!forceDedicated && !this.sharedFallbackStarted) {
+        try {
+          this.engine = createSharedStockfishEngine();
+        } catch (sharedWorkerError) {
+          // Some browsers expose SharedWorker but disable it for the current
+          // context. Fall back to a page-owned worker without breaking the game.
+          this.engine = null;
+        }
+      }
+      this.engine = this.engine || new Worker(buildStockfishWorkerUrl());
       this.enabled = true;
       this.engine.onmessage = (event) => this.handleLine(String(event.data || ""));
       this.engine.onerror = (error) => this.markUnavailable(
@@ -205,8 +334,53 @@ function createStockfishService(name) {
     this.engine = null;
   };
 
+  service.dispose = function (owner) {
+    if (owner && this.activeOwner !== owner) return false;
+
+    this.enabled = false;
+    this.ready = false;
+    this.configuredForStrength = false;
+    this.lastFen = null;
+    this.evalQueue = [];
+    this.pendingEval = null;
+    this.readyCallbacks.splice(0).forEach((callback) => callback(false));
+
+    if (this.pendingBestMove) {
+      const pending = this.pendingBestMove;
+      this.pendingBestMove = null;
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.resolve(null);
+    }
+
+    if (this.engine) {
+      try {
+        this.engine.onmessage = null;
+        this.engine.onerror = null;
+        this.engine.onmessageerror = null;
+        this.engine.terminate();
+      } catch (e) {
+        // The worker may already have stopped during page or game teardown.
+      }
+    }
+    this.engine = null;
+    this.activeOwner = null;
+    return true;
+  };
+
   service.handleLine = function (line) {
     if (!line) return;
+    if (line == "evaluationcancelled") {
+      const interrupted = this.pendingEval;
+      this.pendingEval = null;
+      if (interrupted && !this.evalQueue.some((request) =>
+        request.fen == interrupted.fen && request.index == interrupted.index
+      )) {
+        interrupted.latest = null;
+        this.evalQueue.unshift(interrupted);
+      }
+      this.startNextEvaluation();
+      return;
+    }
     if (line == "uciok") {
       if (!this.configuredForStrength) {
         this.configuredForStrength = true;
@@ -265,13 +439,21 @@ function createStockfishService(name) {
     this.lastFen = request.fen;
     // Identical position + identical depth + an empty hash makes independent
     // clients converge on the same result as closely as a local engine can.
-    this.post("ucinewgame");
-    this.post("setoption name Clear Hash");
-    this.post("position fen " + request.fen);
-    this.post("go depth " + request.depth);
+    const commands = [
+      "ucinewgame",
+      "setoption name Clear Hash",
+      "position fen " + request.fen,
+      "go depth " + request.depth,
+    ];
+    if (typeof this.engine.startSearch == "function") {
+      this.engine.startSearch(commands, "evaluation");
+    } else {
+      commands.forEach((command) => this.post(command));
+    }
   };
 
-  service.analyze = function (board) {
+  service.analyze = function (board, owner) {
+    if (owner && this.activeOwner !== owner) return;
     this.init();
     if (!this.engine) return;
     const fen = boardToFen(board);
@@ -283,14 +465,28 @@ function createStockfishService(name) {
       this.evalQueue.some((request) => request.fen == fen && request.index == index);
     if (duplicate) return;
 
-    this.evalQueue.push({
+    const request = {
       fen,
       index,
       activeColor: fen.split(/\s+/)[1] == "b" ? "b" : "w",
       depth: 14,
       latest: null,
-    });
-    this.startNextEvaluation();
+      owner: owner || this.activeOwner,
+    };
+
+    // Keep every distinct history position. The queue is processed in the
+    // background and is bounded far above a normal game to prevent unbounded
+    // growth from malformed callers.
+    if (this.evalQueue.length >= 512) this.evalQueue.shift();
+    this.evalQueue.push(request);
+    if (this.ready) {
+      this.startNextEvaluation();
+    } else {
+      // Background analysis needs the same stalled-SharedWorker watchdog as
+      // interactive bot searches. Without this call, a broker that constructs
+      // but never reaches readyok leaves every graph sample queued forever.
+      this.whenReady().then(() => this.startNextEvaluation());
+    }
   };
 
   service.whenReady = function () {
@@ -308,15 +504,51 @@ function createStockfishService(name) {
 
       this.readyCallbacks.push(finish);
       this.post("isready");
-      setTimeout(() => finish(this.ready), 5000);
+      setTimeout(() => {
+        if (this.ready) {
+          finish(true);
+          return;
+        }
+
+        // A SharedWorker can be constructed successfully yet still fail before
+        // its nested WASM worker completes the UCI handshake. Retrying the same
+        // persistent broker then returns null forever. Abandon it once for this
+        // service and continue with the proven page-owned worker path.
+        if (this.engine && this.engine.isShared && !this.sharedFallbackStarted) {
+          this.sharedFallbackStarted = true;
+          const stalledSharedEngine = this.engine;
+          this.engine = null;
+          try {
+            stalledSharedEngine.onmessage = null;
+            stalledSharedEngine.onerror = null;
+            stalledSharedEngine.onmessageerror = null;
+            stalledSharedEngine.terminate();
+          } catch (e) {
+            // The stalled shared port may already have disconnected.
+          }
+          this.init(true);
+          if (!this.engine) {
+            finish(false);
+            return;
+          }
+          this.post("isready");
+          setTimeout(() => finish(this.ready), 5000);
+          return;
+        }
+
+        finish(false);
+      }, 5000);
     });
   };
 
   service.getBestMove = function (board, options) {
+    const searchOptions = typeof options == "object" ? options : { depth: options };
+    const owner = searchOptions.owner;
+    if (owner && this.activeOwner !== owner) return Promise.resolve(null);
+
     this.init();
     if (!this.engine) return Promise.resolve(null);
 
-    const searchOptions = typeof options == "object" ? options : { depth: options };
     const depth = searchOptions.depth || 16;
     const hasMoveTime = Number(searchOptions.moveTime) > 0;
     const moveTime = hasMoveTime ? Number(searchOptions.moveTime) : 0;
@@ -333,19 +565,25 @@ function createStockfishService(name) {
       this.lastFen = fen;
       this.pendingEval = null;
       this.post("stop");
-      this.post("ucinewgame");
-      this.post("isready");
-      this.post(`position fen ${fen}`);
 
       return new Promise((resolve) => {
-        const pending = { resolve, timer: null };
+        const pending = { resolve, timer: null, owner: owner || this.activeOwner };
         this.pendingBestMove = pending;
-        this.post(hasMoveTime ? `go movetime ${moveTime}` : `go depth ${depth}`);
+        const commands = [
+          "ucinewgame",
+          `position fen ${fen}`,
+          hasMoveTime ? `go movetime ${moveTime}` : `go depth ${depth}`,
+        ];
+        if (typeof this.engine.startSearch == "function") {
+          this.engine.startSearch(commands, "bot");
+        } else {
+          commands.forEach((command) => this.post(command));
+        }
         pending.timer = setTimeout(() => {
           if (this.pendingBestMove === pending) {
-            this.pendingBestMove = null;
-            resolve(null);
-            this.startNextEvaluation();
+            // A timed-out worker may still be stuck in native/WASM search.
+            // Tear it down so the next bot turn starts with a clean engine.
+            this.markUnavailable("best-move search timed out");
           }
         }, timeout);
       });
@@ -405,6 +643,19 @@ function hideEvaluationBar() {
   $("#evaluationBar").removeClass("evaluation-visible");
 }
 
+function showPendingEvaluationBar() {
+  const fill = $("#evaluationWhiteFill");
+  const label = $("#evaluationScore");
+  if (!fill.length || !label.length) return;
+  $("#evaluationBar").addClass("evaluation-visible");
+  if (typeof window != "undefined" && window.matchMedia && window.matchMedia("(max-width: 680px)").matches) {
+    fill.css({ width: "50%", height: "100%" });
+  } else {
+    fill.css({ height: "50%", width: "100%" });
+  }
+  label.text("…");
+}
+
 function showFinalEvaluation(result) {
   if (!result || result.result == "draw" || !result.winner) {
     hideEvaluationBar();
@@ -419,13 +670,35 @@ function showFinalEvaluation(result) {
   });
 }
 
-window.StockfishChess = createStockfishService();
-window.StockfishBotChess = createStockfishService("stockfish-bot");
+// If this bundle is evaluated again in the same Window, synchronously dispose
+// only services created by the previous evaluation before replacing them.
+// Window globals are tab-scoped, so this cannot terminate another open page's
+// workers.
+[window.StockfishChess, window.StockfishBotChess].forEach(function (service) {
+  if (service && service.isStockfishService && typeof service.dispose == "function") {
+    service.dispose();
+  }
+});
+
+const pageEvaluationService = createStockfishService();
+const pageBotService = createStockfishService("stockfish-bot");
+window.StockfishChess = pageEvaluationService;
+window.StockfishBotChess = pageBotService;
 window.boardToFen = boardToFen;
 window.uciToMove = uciToMove;
 window.hideEvaluationBar = hideEvaluationBar;
+window.showPendingEvaluationBar = showPendingEvaluationBar;
 window.showFinalEvaluation = showFinalEvaluation;
 window.updateEvaluationBar = updateEvaluationBar;
+
+if (typeof window.addEventListener == "function") {
+  window.addEventListener("pagehide", function () {
+    // Capture this bundle's exact instances. A late event from an older bundle
+    // must never dispose replacement services installed after it.
+    pageEvaluationService.dispose();
+    pageBotService.dispose();
+  });
+}
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {

@@ -1,19 +1,79 @@
+// Defensive startup cleanup for a runtime reloaded into the same tab. A normal
+// navigation gets a new Window, but development reloaders or duplicate bundle
+// injection can leave an old board, timers, and socket reachable. Only this
+// tab's globals are touched; other pages have separate Window objects.
+(function cleanupPreviousChessRuntime() {
+  const previousBoard = window.board;
+  if (previousBoard && typeof previousBoard.resetGame == "function") {
+    previousBoard.resetGame();
+  }
+  if (typeof window.stopClockSync == "function") {
+    window.stopClockSync();
+  }
+  const previousSocket = window.gameSocket;
+  if (previousSocket && typeof previousSocket.close == "function") {
+    try {
+      previousSocket.close();
+    } catch (e) {
+      // The old socket may already be closing.
+    }
+  }
+  window.board = null;
+  window.gameSocket = null;
+})();
+
+window.chessAppReady = false;
+
+window.markChessAppReady = function () {
+  const requiredGlobals = [
+    "Board",
+    "Move",
+    "Pawn",
+    "King",
+    "Queen",
+    "Bishop",
+    "Rook",
+    "Knight",
+    "initHtmlBoard",
+  ];
+  const missingGlobals = requiredGlobals.filter(function (name) {
+    return typeof window[name] == "undefined";
+  });
+
+  if (missingGlobals.length) {
+    window.chessAppReady = false;
+    $("#app_loading_panel .spinner-border").css("display", "none");
+    $("#app_loading_message").text(
+      "The chess game could not finish loading. Please refresh and try again."
+    );
+    return false;
+  }
+
+  window.chessAppReady = true;
+  $("#app_loading_panel").css("display", "none");
+  $("#main_pannnel").css("display", "block");
+  $("#startGameBtn")
+    .prop("disabled", false)
+    .attr("aria-disabled", "false");
+  if (typeof window.resumeOnlineConnectionOnLoad == "function") {
+    window.resumeOnlineConnectionOnLoad();
+  }
+  return true;
+};
+
+var gameStartInProgress = false;
+
 // Global function to reset game and immediately start a new game with same settings
 window.resetGameAndStartNew = function () {
+  clearPersistedOnlineSession();
   // Clean up existing game
   if (window.board && typeof window.board.resetGame == "function") {
     window.board.resetGame();
   }
 
-  // Clean up WebSocket
-  if (window.gameSocket) {
-    try {
-      window.gameSocket.close();
-    } catch (e) {
-      // Ignore
-    }
-    window.gameSocket = null;
-  }
+  // Clean up WebSocket and prevent its close event from reconnecting.
+  if (onlineConnection) onlineConnection.active = false;
+  closeActiveGameSocket();
 
   // Stop clock sync
   if (typeof window.stopClockSync == "function") {
@@ -128,20 +188,15 @@ window.resetGameAndStartNew = function () {
 
 // Global function to reset game and show hub
 window.resetGameAndShowHub = function () {
+  clearPersistedOnlineSession();
   // Clean up existing game
   if (window.board && typeof window.board.resetGame == "function") {
     window.board.resetGame();
   }
 
-  // Clean up WebSocket
-  if (window.gameSocket) {
-    try {
-      window.gameSocket.close();
-    } catch (e) {
-      // Ignore
-    }
-    window.gameSocket = null;
-  }
+  // Clean up WebSocket and prevent its close event from reconnecting.
+  if (onlineConnection) onlineConnection.active = false;
+  closeActiveGameSocket();
 
   // Stop clock sync
   if (typeof window.stopClockSync == "function") {
@@ -197,6 +252,122 @@ $("html").droppable({
 });
 
 let searchingLoop = -1;
+let reconnectTimer = null;
+let reconnectStartedAt = 0;
+let reconnectAttempts = 0;
+let lastServerEventSeq = 0;
+let lastPongAt = 0;
+let socketClosedIntentionally = false;
+let onlineConnection = null;
+
+function getOnlineClientId() {
+  const storageKey = "chess-online-client-id";
+  try {
+    let clientId = window.sessionStorage.getItem(storageKey);
+    if (!clientId) {
+      clientId = window.crypto && typeof window.crypto.randomUUID == "function"
+        ? window.crypto.randomUUID().replace(/-/g, "")
+        : `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}_${Math.random().toString(36).slice(2)}`;
+      window.sessionStorage.setItem(storageKey, clientId);
+    }
+    return clientId;
+  } catch (e) {
+    return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}_${Math.random().toString(36).slice(2)}`;
+  }
+}
+
+const onlineClientId = getOnlineClientId();
+const onlineSessionStorageKey = "chess-online-active-session";
+
+function readPersistedOnlineSession() {
+  try {
+    const value = JSON.parse(window.sessionStorage.getItem(onlineSessionStorageKey));
+    if (!value || !Number.isFinite(value.gameTimeSeconds) || !Number.isFinite(value.incrementSeconds)) return null;
+    return value;
+  } catch (e) {
+    return null;
+  }
+}
+
+function persistOnlineSession(phase) {
+  if (!onlineConnection) return;
+  const value = {
+    phase: phase,
+    gameTimeSeconds: onlineConnection.gameTimeSeconds,
+    incrementSeconds: onlineConnection.incrementSeconds,
+  };
+  try {
+    window.sessionStorage.setItem(onlineSessionStorageKey, JSON.stringify(value));
+  } catch (e) {
+    // Recovery remains available for transient disconnects in this page.
+  }
+}
+
+function clearPersistedOnlineSession() {
+  try {
+    window.sessionStorage.removeItem(onlineSessionStorageKey);
+  } catch (e) {
+    // Ignore unavailable session storage.
+  }
+}
+
+function applyServerClock(clock) {
+  if (!clock || !window.board) return;
+  const whiteMs = Number(clock.white_ms);
+  const blackMs = Number(clock.black_ms);
+  if (!Number.isFinite(whiteMs) || !Number.isFinite(blackMs)) return;
+
+  const serverNow = window.estimatedServerTime ? window.estimatedServerTime() : Date.now();
+  const ticksFrom = Number(clock.ticks_from || clock.server_time || serverNow);
+  const elapsed = Math.max(0, serverNow - ticksFrom);
+  const adjustedWhite = clock.active_color == "white" ? Math.max(0, whiteMs - elapsed) : whiteMs;
+  const adjustedBlack = clock.active_color == "black" ? Math.max(0, blackMs - elapsed) : blackMs;
+  board.timerWhite.pause();
+  board.timerBlack.pause();
+  board.timerWhite.setRemainingMs(adjustedWhite);
+  board.timerBlack.setRemainingMs(adjustedBlack);
+  if (ticksFrom > serverNow) {
+    const currentBoard = board;
+    setTimeout(function () {
+      if (window.board === currentBoard && window.gameState == "playing") {
+        applyServerClock(clock);
+      }
+    }, ticksFrom - serverNow);
+    return;
+  }
+  if (window.gameState == "playing") {
+    if (clock.active_color == "white") board.timerWhite.resume();
+    else board.timerBlack.resume();
+  }
+}
+
+window.resumeOnlineConnectionOnLoad = function () {
+  if (window.STATIC_EXPORT || onlineConnection) return false;
+  const saved = readPersistedOnlineSession();
+  if (!saved) return false;
+
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const url = `${protocol}://${window.location.host}/ws/socket-server/${saved.gameTimeSeconds}/${saved.incrementSeconds}/`;
+  $("#playerTimeInput").val(saved.gameTimeSeconds);
+  $("#playerIncrementInput").val(saved.incrementSeconds);
+  $('input[name="mode_of_play"][value="online"]').prop("checked", true);
+  updatePlayerColorOptions();
+  window.timeSetted = saved.gameTimeSeconds;
+  window.increment = saved.incrementSeconds;
+  syncDone = saved.phase == "game";
+  gameStartInProgress = true;
+  onlineConnection = {
+    url: url,
+    active: true,
+    resumeOnly: saved.phase == "game",
+    gameTimeSeconds: saved.gameTimeSeconds,
+    incrementSeconds: saved.incrementSeconds,
+  };
+  $("#app_loading_panel").css("display", "none");
+  showOwnReconnectState();
+  openOnlineSocket();
+  return true;
+};
 
 function setMatchmakingCancelEnabled(enabled) {
   const cancelButton = $("#cancelMatchmakingBtn");
@@ -209,6 +380,15 @@ function setMatchmakingCancelEnabled(enabled) {
 }
 
 function closeActiveGameSocket() {
+  socketClosedIntentionally = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  if (searchingLoop) {
+    clearInterval(searchingLoop);
+    searchingLoop = -1;
+  }
   if (!window.gameSocket) return;
 
   try {
@@ -217,6 +397,258 @@ function closeActiveGameSocket() {
     // Ignore WebSocket close errors during user cancellation/reset.
   }
   window.gameSocket = null;
+}
+
+function sendSocketEvent(event) {
+  if (!window.gameSocket || window.gameSocket.readyState !== WebSocket.OPEN) return false;
+  window.gameSocket.send(JSON.stringify({ chess_event: JSON.stringify(event) }));
+  return true;
+}
+
+function setConnectionBanner(message, kind) {
+  const banner = $("#connectionStatusBanner");
+  if (!banner.length) return;
+  banner
+    .text(message || "")
+    .attr("data-kind", kind || "info")
+    .toggleClass("visible", !!message);
+}
+
+function startSocketHeartbeat() {
+  if (searchingLoop) clearInterval(searchingLoop);
+  lastPongAt = Date.now();
+  searchingLoop = setInterval(function () {
+    if (!window.gameSocket || window.gameSocket.readyState !== WebSocket.OPEN) return;
+    // Background tabs can throttle timers heavily, so tolerate delayed pongs
+    // while still generating regular traffic when the tab is active.
+    if (Date.now() - lastPongAt > 90000) {
+      window.gameSocket.close(4003, "Heartbeat timeout");
+      return;
+    }
+    sendSocketEvent({ type: "ping", client_time: Date.now() });
+  }, 15000);
+}
+
+function showOwnReconnectState() {
+  $(".overlay").css("display", "flex");
+  $("#main_pannnel").css("display", "none");
+  $("#loadding_pannnel").css("display", "flex");
+  $("#loading_chess_event").text("Reconnecting…");
+  $("#cancelMatchmakingBtn").css("display", syncDone ? "none" : "inline-block");
+}
+
+function restoreConnectedView() {
+  setConnectionBanner("", "info");
+  if (window.board && window.gameState == "playing") {
+    $(".overlay").css("display", "none");
+  }
+  $("#cancelMatchmakingBtn").css("display", "inline-block");
+}
+
+function scheduleSocketReconnect() {
+  if (!onlineConnection || !onlineConnection.active || socketClosedIntentionally) return;
+  if (!reconnectStartedAt) reconnectStartedAt = Date.now();
+  if (Date.now() - reconnectStartedAt >= 28000) {
+    onlineConnection.active = false;
+    gameStartInProgress = false;
+    if (window.gameState == "playing") {
+      window.resetGameAndShowHub();
+      setConnectionBanner("Connection lost. The game could not be recovered.", "error");
+    } else {
+      $("#loadding_pannnel").css("display", "none");
+      $("#main_pannnel").css("display", "block");
+      setConnectionBanner("Connection lost. Please start matchmaking again.", "error");
+    }
+    return;
+  }
+
+  showOwnReconnectState();
+  const delay = Math.min(500 * Math.pow(2, reconnectAttempts++), 4000);
+  reconnectTimer = setTimeout(openOnlineSocket, delay);
+}
+
+function processOnlineGameEvent(data, replaying) {
+  const serverSequence = Number(data._server_seq) || 0;
+  if (serverSequence) {
+    // WebSockets are ordered, but reconnect replay and a replacement socket
+    // can overlap. Never apply the same authoritative event twice.
+    if (serverSequence <= lastServerEventSeq) return;
+    lastServerEventSeq = serverSequence;
+  }
+  const isOwnEcho = data._sender_id == onlineClientId && !replaying;
+
+  if (data.type === "draw_offer") {
+    if (window.board && typeof window.board.receiveDrawOffer == "function") {
+      window.board.receiveDrawOffer(data);
+    }
+    applyServerClock(data.clock);
+    return;
+  }
+  if (data.type === "draw_declined") {
+    if (window.board && typeof window.board.receiveDrawDeclined == "function") {
+      window.board.receiveDrawDeclined(data);
+    }
+    applyServerClock(data.clock);
+    return;
+  }
+  if (data.type === "game_over") {
+    if (onlineConnection) onlineConnection.active = false;
+    clearPersistedOnlineSession();
+    setConnectionBanner("", "info");
+    if (window.board && typeof window.board.applyGameOver == "function") {
+      window.board.applyGameOver(data);
+    } else {
+      window.gameState = "notPlaying";
+      window.pendingGameOver = data;
+    }
+    return;
+  }
+  if (window.gameState != "playing" || isOwnEcho) {
+    applyServerClock(data.clock);
+    return;
+  }
+  if (data.type == "upgrade") {
+    window.lastUpgradedPiece = data.piece;
+  }
+  if (data.type == "upgrade" || (data.type != "sync" && data.type != "match_found")) {
+    if (makeMove(board, data.x, data.y, data.newX, data.newY, { animate: !replaying, remote: true }) && board && typeof board.tryExecutePremoveStack == "function") {
+      board.tryExecutePremoveStack();
+    }
+  }
+  applyServerClock(data.clock);
+}
+
+function handleOnlineSocketMessage(e) {
+  let rawData;
+  let data;
+  try {
+    rawData = JSON.parse(e.data);
+    data = rawData.chess_event ? JSON.parse(rawData.chess_event) : rawData;
+  } catch (error) {
+    return;
+  }
+
+  if (data.type === "pong") {
+    lastPongAt = Date.now();
+    reconnectStartedAt = 0;
+    return;
+  }
+  if (data.type === "clock_sync_response") {
+    lastPongAt = Date.now();
+    if (window.ClockSync) {
+      window.ClockSync.handleClockSyncResponse(data.server_time, data.client_send_time);
+    }
+    return;
+  }
+  if (data.type === "opponent_connection") {
+    setConnectionBanner(
+      data.connected ? "Opponent reconnected." : `Opponent disconnected. Waiting up to ${data.grace_seconds} seconds…`,
+      data.connected ? "success" : "warning"
+    );
+    if (data.connected) setTimeout(function () { setConnectionBanner("", "info"); }, 2500);
+    return;
+  }
+  if (data.type === "resume_unavailable") {
+    clearPersistedOnlineSession();
+    if (onlineConnection) onlineConnection.active = false;
+    closeActiveGameSocket();
+    syncDone = false;
+    gameStartInProgress = false;
+    $("#loadding_pannnel").css("display", "none");
+    $("#main_pannnel").css("display", "block");
+    setConnectionBanner("The previous online game has ended.", "info");
+    return;
+  }
+  if (data.type === "match_resumed") {
+    syncDone = true;
+    reconnectStartedAt = 0;
+    // Rebuild from the server's complete checkpoint. This also repairs the
+    // narrow case where a move changed the local board while socket.send()
+    // raced a disconnect and the server never received it.
+    createNewGame(data.color, { preserveOnlineConnection: true });
+    window.playAs = data.color;
+    lastServerEventSeq = 0;
+    (data.history || data.missed_events || []).forEach(function (event) {
+      processOnlineGameEvent(event, true);
+    });
+    lastServerEventSeq = Math.max(lastServerEventSeq, data.last_event_seq || 0);
+    applyServerClock(data.clock);
+    if (onlineConnection) onlineConnection.resumeOnly = true;
+    persistOnlineSession("game");
+    restoreConnectedView();
+    window.startClockSync();
+    return;
+  }
+  if (!syncDone && data.type == "match_found") {
+    syncDone = true;
+    reconnectStartedAt = 0;
+    const t1 = Date.now();
+    const t2 = data.server_time || data.date_start;
+    if (t1 > 0 && t2 > 0) window.setServerTimeOffset(t2 - t1);
+    const nowServerTime = window.estimatedServerTime ? window.estimatedServerTime() : Date.now();
+    const diffTime = Math.max(0, data.date_start - nowServerTime);
+    $("#loading_chess_event").html("Match Found");
+    setMatchmakingCancelEnabled(false);
+    if (onlineConnection) onlineConnection.resumeOnly = true;
+    persistOnlineSession("game");
+    const connectionAtMatch = onlineConnection;
+    setTimeout(function () {
+      if (
+        onlineConnection !== connectionAtMatch ||
+        !onlineConnection ||
+        !onlineConnection.active ||
+        (window.board && window.gameState == "playing")
+      ) {
+        return;
+      }
+      createNewGame(data.color);
+      window.playAs = data.color;
+      applyServerClock(data.clock);
+      restoreConnectedView();
+      if (window.isGameOnline && window.gameState == "playing") window.startClockSync();
+    }, diffTime);
+    return;
+  }
+  processOnlineGameEvent(data, false);
+}
+
+function openOnlineSocket() {
+  if (!onlineConnection || !onlineConnection.active) return;
+  const socket = new WebSocket(onlineConnection.url);
+  window.gameSocket = socket;
+  socketClosedIntentionally = false;
+
+  socket.onopen = function () {
+    if (window.gameSocket !== socket) return;
+    reconnectAttempts = 0;
+    lastPongAt = Date.now();
+    sendSocketEvent({
+      type: "sync",
+      client_id: onlineClientId,
+      last_event_seq: lastServerEventSeq,
+      resume_only: !!onlineConnection.resumeOnly,
+    });
+    startSocketHeartbeat();
+  };
+  socket.onmessage = function (event) {
+    // A close and replacement can happen before the old socket's queued
+    // messages drain. Only the currently-owned socket may mutate this game.
+    if (window.gameSocket !== socket) return;
+    handleOnlineSocketMessage(event);
+  };
+  socket.onerror = function () {
+    // onclose owns retry scheduling so each failure creates only one retry.
+  };
+  socket.onclose = function () {
+    if (window.gameSocket !== socket) return;
+    window.gameSocket = null;
+    if (searchingLoop) {
+      clearInterval(searchingLoop);
+      searchingLoop = -1;
+    }
+    if (typeof window.stopClockSync == "function") window.stopClockSync();
+    scheduleSocketReconnect();
+  };
 }
 
 function updateBotOptionsVisibility() {
@@ -306,6 +738,9 @@ function cancelOnlineMatchmaking() {
   }
 
   syncDone = false;
+  gameStartInProgress = false;
+  clearPersistedOnlineSession();
+  if (onlineConnection) onlineConnection.active = false;
   closeActiveGameSocket();
   setMatchmakingCancelEnabled(true);
   $("#loading_chess_event").html("Looking for a match");
@@ -315,7 +750,8 @@ function cancelOnlineMatchmaking() {
 
 window.cancelOnlineMatchmaking = cancelOnlineMatchmaking;
 
-var createNewGame = (playAs) => {
+var createNewGame = (playAs, options) => {
+  options = options || {};
   // Store the last playAs for restart functionality
   window._lastPlayAs = playAs || window.playAs;
   window.isGameVsBot = false;
@@ -336,7 +772,9 @@ var createNewGame = (playAs) => {
   // If a board already exists, reset it first
   if (window.board) {
     if (typeof window.board.resetGame == "function") {
-      window.board.resetGame();
+      window.board.resetGame({
+        preserveOnlineConnection: options.preserveOnlineConnection === true,
+      });
     }
     window.board = null;
   }
@@ -401,6 +839,7 @@ var createNewGame = (playAs) => {
     window.pendingGameOver = null;
     board.applyGameOver(pendingGameOver);
   }
+  gameStartInProgress = false;
 };
 
 $("#playerIncrementInput , #playerTimeInput").on("input", function (e) {
@@ -426,6 +865,9 @@ $("#playerIncrementInput , #playerTimeInput").on("input", function (e) {
 var syncDone = false;
 
 function initGame() {
+  if (!window.chessAppReady || gameStartInProgress) return;
+  gameStartInProgress = true;
+
   $(".is-invalid").removeClass("is-invalid");
   let isValid = true;
   syncDone = false;
@@ -454,6 +896,7 @@ function initGame() {
     if ($('input[name="mode_of_play"]:checked').val() == "online") {
       if (window.STATIC_EXPORT) {
         alert("Online mode requires the Django/WebSocket backend. Please choose offline or vs bot.");
+        gameStartInProgress = false;
         return;
       }
 
@@ -465,121 +908,24 @@ function initGame() {
       const gameTimeSeconds = Math.trunc(window.timeSetted);
       const incrementSeconds = Math.trunc(window.increment);
       let url = `${protocol}://${window.location.host}/ws/socket-server/${gameTimeSeconds}/${incrementSeconds}/`;
-
-      window.gameSocket = new WebSocket(url);
-
-       window.gameSocket.onmessage = function (e) {
-        let rawData = JSON.parse(e.data);
-        let data = rawData.chess_event ? JSON.parse(rawData.chess_event) : rawData;
-
-        // Handle clock sync responses
-        if (data.type === 'clock_sync_response') {
-          if (window.ClockSync) {
-            window.ClockSync.handleClockSyncResponse(data.server_time, data.client_send_time);
-          }
-          return;
-        }
-
-        if (data.type === "draw_offer") {
-          if (window.board && typeof window.board.receiveDrawOffer == "function") {
-            window.board.receiveDrawOffer(data);
-          }
-          return;
-        }
-
-        if (data.type === "draw_declined") {
-          if (window.board && typeof window.board.receiveDrawDeclined == "function") {
-            window.board.receiveDrawDeclined(data);
-          }
-          return;
-        }
-
-        if (data.type === "game_over") {
-          if (window.board && typeof window.board.applyGameOver == "function") {
-            window.board.applyGameOver(data);
-          } else {
-            window.gameState = "notPlaying";
-            window.pendingGameOver = data;
-          }
-          return;
-        }
-
-        if (!syncDone && data.type == "match_found") {
-          syncDone = true;
-          clearInterval(searchingLoop);
-
-          // Perform initial clock sync using the server-stamped sync message
-          const t1 = Date.now();
-          const t2 = data.server_time || data.date_start;
-          const t3 = t2;
-          const t4 = Date.now();
-          if (t1 > 0 && t2 > 0) {
-            const offset = ((t2 - t1) + (t3 - t4)) / 2;
-            window.setServerTimeOffset(offset);
-            window.lastSyncOffset = offset;
-            window.lastSyncRTT = t4 - t1;
-            window.lastSyncTime = Date.now();
-            console.log('[Clock Sync] Initial offset:', offset.toFixed(2), 'ms');
-          }
-
-          const nowServerTime = window.estimatedServerTime ? window.estimatedServerTime() : Date.now();
-          const date1 = new Date(nowServerTime);
-          const date2 = new Date();
-          date2.setTime(data.date_start);
-
-          const diffTime = Math.max(0, date2 - date1);
-          console.log(diffTime);
-
-          $("#loading_chess_event").html("Match Found");
-          setMatchmakingCancelEnabled(false);
-
-          setTimeout(function () {
-            createNewGame(data.color);
-            window.playAs = data.color;
-            // Start periodic clock sync after game starts
-            if (window.isGameOnline && window.gameState == "playing") {
-              window.startClockSync();
-            }
-          }, diffTime);
-        } else if (window.gameState != "playing") {
-          return;
-        } else if (data.type == "upgrade") {
-          window.lastUpgradedPiece = data.piece;
-          if (makeMove(board, data.x, data.y, data.newX, data.newY, { animate: true, remote: true }) && board && typeof board.tryExecutePremoveStack == "function") {
-            board.tryExecutePremoveStack();
-          }
-        } else if (
-          data.type != "upgrade" &&
-          data.type != "sync" &&
-          data.type != "match_found"
-        ) {
-          if (makeMove(board, data.x, data.y, data.newX, data.newY, { animate: true, remote: true }) && board && typeof board.tryExecutePremoveStack == "function") {
-            board.tryExecutePremoveStack();
-          }
-        }
-      };
-
-      setTimeout(function () {
-        clearInterval(searchingLoop);
-        searchingLoop = setInterval(function () {
-          if (!window.gameSocket || window.gameSocket.readyState !== 1 || syncDone) {
-            clearInterval(searchingLoop);
-            return;
-          }
-          window.gameSocket.send(
-            JSON.stringify({
-              chess_event: JSON.stringify({
-                type: "sync",
-                game_time_seconds: gameTimeSeconds,
-                increment_seconds: incrementSeconds,
-              }),
-            })
-          );
-        }, 1000);
-      }, 100);
+      lastServerEventSeq = 0;
+      reconnectStartedAt = 0;
+      reconnectAttempts = 0;
+      socketClosedIntentionally = false;
+      onlineConnection = { url: url, active: true };
+      onlineConnection.gameTimeSeconds = gameTimeSeconds;
+      onlineConnection.incrementSeconds = incrementSeconds;
+      onlineConnection.resumeOnly = false;
+      persistOnlineSession("queue");
+      setConnectionBanner("", "info");
+      openOnlineSocket();
     } else {
       createNewGame(resolveSelectedPlayerColor());
     }
+  }
+
+  if (!isValid) {
+    gameStartInProgress = false;
   }
 }
 

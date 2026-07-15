@@ -39,8 +39,41 @@ function getAuthoritativeMoveTarget(pieces, movingPiece, moveOptions) {
   }) || null;
 }
 
+function getAutomaticPromotionChoice(isOnline, isVsBot, pendingChoice, botIsMoving) {
+  if ((isOnline || isVsBot) && pendingChoice) return pendingChoice;
+  if (isVsBot && botIsMoving) return "Queen";
+  return null;
+}
+
+function centerDraggableOnPointer(draggableInstance) {
+  if (!draggableInstance || !draggableInstance.helperProportions) return false;
+
+  const width = Number(draggableInstance.helperProportions.width);
+  const height = Number(draggableInstance.helperProportions.height);
+  if (!(width > 0) || !(height > 0)) return false;
+
+  const cursorAt = { left: width / 2, top: height / 2 };
+  if (typeof draggableInstance._adjustOffsetFromHelper == "function") {
+    // jQuery UI invokes the first positioned drag immediately after `start`,
+    // so changing its cached click offset here centers the helper without a
+    // visible intermediate frame at the original grab point.
+    draggableInstance._adjustOffsetFromHelper(cursorAt);
+    return true;
+  }
+
+  // Keep this compatible with equivalent draggable implementations that
+  // expose the cached offsets but not jQuery UI's adjustment helper.
+  if (!draggableInstance.offset || !draggableInstance.offset.click) return false;
+  const margins = draggableInstance.margins || {};
+  draggableInstance.offset.click.left = cursorAt.left + (Number(margins.left) || 0);
+  draggableInstance.offset.click.top = cursorAt.top + (Number(margins.top) || 0);
+  return true;
+}
+
 const CHESS_RECAP_PIECE_VALUES = { Pawn: 1, Knight: 3, Bishop: 3, Rook: 5, Queen: 9, King: 0 };
 const CHESS_RECAP_PIECE_ICONS = { Pawn: "fa-chess-pawn", Knight: "fa-chess-knight", Bishop: "fa-chess-bishop", Rook: "fa-chess-rook", Queen: "fa-chess-queen", King: "fa-chess-king" };
+const THINKING_ARROW_VISIBLE_INSET = 0.25;
+const THINKING_ARROW_HEAD_FORWARD_LENGTH = 0.32;
 function chessRecapPieceValue(type) { return CHESS_RECAP_PIECE_VALUES[type] || 0; }
 function chessRecapPieceIcon(type) { return CHESS_RECAP_PIECE_ICONS[type] || "fa-chess-pawn"; }
 function chessRecapFormatDuration(ms) { ms = Math.max(0, Number(ms) || 0); const s = ms / 1000; return s < 10 ? `${s.toFixed(1)}s` : `${Math.round(s)}s`; }
@@ -184,6 +217,15 @@ function Board(board, playAs) {
   window.normalMovesCounter = 0;
   this.board = board;
   this.playAs = playAs;
+  this.stockfishOwner = {};
+  this.stockfishEvaluationService = window.StockfishChess || null;
+  this.stockfishBotService = window.StockfishBotChess || null;
+  this.stockfishDisposed = false;
+  [this.stockfishEvaluationService, this.stockfishBotService].forEach((service) => {
+    if (service && typeof service.claim == "function") {
+      service.claim(this.stockfishOwner);
+    }
+  });
   this.turn = "white";
   this.pieces = [];
   this.moves = [];
@@ -197,6 +239,7 @@ function Board(board, playAs) {
   this.pendingHistoryMove = null;
   this.pendingHistoryTurn = null;
   this.draggableUpdateTimer = null;
+  this.botMoveTimer = null;
   this.gameOverBroadcasted = false;
   this.gameActionControlsElement = null;
   this.gameActionConfirmationElement = null;
@@ -207,6 +250,18 @@ function Board(board, playAs) {
   this.premoveStack = [];
   this.premoveVisualPositions = new Map();
   this.isExecutingPremoveStack = false;
+  this.isCancellingDrag = false;
+  this.selectedClickPiece = null;
+  this.thinkingSquareHighlights = new Set();
+  this.thinkingArrows = new Map();
+  this.thinkingGesture = null;
+  if (typeof document != "undefined") {
+    const oldThinkingLayer = document.getElementById("thinkingArrowLayer");
+    if (oldThinkingLayer && oldThinkingLayer.parentNode) {
+      oldThinkingLayer.parentNode.removeChild(oldThinkingLayer);
+    }
+    $("#board td").removeClass("thinking-square-highlight");
+  }
   this.removeFiftyMoveDrawClaimButton();
   if (typeof window.resetClockVisuals == "function") {
     window.resetClockVisuals();
@@ -214,16 +269,14 @@ function Board(board, playAs) {
   this.timerWhite = startTimer(
     window.timeSetted + 0.5,
     function () {
-      playChessSound(stallMate);
-      bigBoardObject.playerWon("black", "on time");
+      bigBoardObject.finishGameOnTime("black");
     },
     $("#WhiteTimer")[0]
   );
   this.timerBlack = startTimer(
     window.timeSetted + 0.5,
     function () {
-      playChessSound(stallMate);
-      bigBoardObject.playerWon("white", "on time");
+      bigBoardObject.finishGameOnTime("white");
     },
     $("#BlackTimer")[0]
   );
@@ -243,6 +296,22 @@ function Board(board, playAs) {
       let square = $(this);
       let piece = $(ui.draggable).data("piece");
       if (!piece) return;
+
+      // A capture can arrive while this element is still held. jQuery UI will
+      // finish the drag with the old data("piece") even though moveTo already
+      // removed that piece from the authoritative position. Never let that
+      // stale helper create a move, history entry, socket event, or premove.
+      if (!bigBoardObject.isAuthoritativePieceLive(piece)) {
+        bigBoardObject.resetPiecePosition(piece);
+        return;
+      }
+
+      // Escape/right-click release jQuery UI with a synthetic mouseup. Never
+      // let that release pass through the normal move/premove drop path.
+      if (bigBoardObject.isCancellingDrag) {
+        bigBoardObject.resetPiecePosition(piece);
+        return;
+      }
 
       if (window.gameState != "playing") {
         bigBoardObject.resetPiecePosition(piece);
@@ -349,6 +418,7 @@ function Board(board, playAs) {
             deferMoveSound: deferQuietPromotionMoveSound,
             turnAfterMove: piece.color == "white" ? "black" : "white",
             animate: window.shouldAnimateProgrammaticMove === true || window.BotPlaying === true,
+            preserveDraggedElement: window.preserveDraggedMovePiece === piece,
           });
 
           bigBoardObject.movesPlayedByColor[piece.color] =
@@ -370,6 +440,7 @@ function Board(board, playAs) {
               if (window.isGameOnline && pieceName) {
                 soketObj.piece = pieceName;
                 soketObj.type = "upgrade";
+                soketObj.onlyKing = bigBoardObject.getOnlyKingState();
                 if (!window.isApplyingRemoteMove) {
                   window.gameSocket.send(
                     JSON.stringify({
@@ -397,12 +468,16 @@ function Board(board, playAs) {
               return true;
             };
 
-            if (window.isGameOnline && window.lastUpgradedPiece) {
-              const upgradedPieceName = window.lastUpgradedPiece;
+            const automaticPromotionChoice = getAutomaticPromotionChoice(
+              window.isGameOnline,
+              window.isGameVsBot,
+              window.lastUpgradedPiece,
+              window.BotPlaying
+            );
+            if (automaticPromotionChoice) {
+              const upgradedPieceName = automaticPromotionChoice;
               finishPromotion(window[upgradedPieceName] || Queen, upgradedPieceName);
               window.lastUpgradedPiece = false;
-            } else if (window.isGameVsBot && window.BotPlaying) {
-              finishPromotion(Queen);
             } else {
               window.humainIsUpgrading = true;
               bigBoardObject.updateDraggables();
@@ -421,9 +496,7 @@ function Board(board, playAs) {
                                   </button>`);
                 btn.on("click", function () {
                   window.humainIsUpgrading = false;
-                  if (finishPromotion(choice.piece, choice.name) && window.isGameVsBot) {
-                    botMove(bigBoardObject, bigBoardObject.getBotColor());
-                  }
+                  finishPromotion(choice.piece, choice.name);
                 });
                 div.append(btn);
               }
@@ -440,6 +513,7 @@ function Board(board, playAs) {
             }
           } else {
             if (window.isGameOnline && !window.isApplyingRemoteMove) {
+              soketObj.onlyKing = bigBoardObject.getOnlyKingState();
               window.gameSocket.send(
                 JSON.stringify({
                   chess_event: JSON.stringify(soketObj),
@@ -456,17 +530,11 @@ function Board(board, playAs) {
             }
           }
 
-          if (window.isGameVsBot && window.gameState == "playing") {
-            if (window.BotPlaying) {
-              window.BotPlaying = false;
-            } else if (!window.humainIsUpgrading) {
-              botMove(bigBoardObject, bigBoardObject.getBotColor());
-            }
-          }
         }
       }
     },
   });
+  this.bindClickToMove();
 }
 Board.prototype.attackPawnBeheindEnPassant = function (piece, x, y) {
   if (piece.color == "black") {
@@ -481,44 +549,64 @@ Board.prototype.attackPawnBeheindEnPassant = function (piece, x, y) {
 };
 
 Board.prototype.isCheckIfMovePlayed = function (piece, x, y) {
-  let king = null;
-  let isCheckNow = false;
-  for (const p of this.pieces) {
-    if (p) {
-      if (p.constructor.name == "King" && piece.color == p.color) {
-        king = p;
-        break;
+  const king = this.pieces.find(function (candidate) {
+    return candidate && candidate.constructor.name == "King" && candidate.color == piece.color;
+  });
+  if (!king) return true;
+
+  const originalPieces = this.pieces.slice();
+  const originalPieceX = piece.x;
+  const originalPieceY = piece.y;
+  const destinationPiece = this.pieceAtSquare(x, y);
+  const isCastling =
+    piece.constructor.name == "King" &&
+    destinationPiece &&
+    destinationPiece.color == piece.color &&
+    destinationPiece.constructor.name == "Rook" &&
+    originalPieceX == x;
+  const isEnPassant =
+    piece.constructor.name == "Pawn" &&
+    originalPieceY != y &&
+    !destinationPiece &&
+    typeof piece.isEnPassant == "function" &&
+    piece.isEnPassant(this, x, y);
+  let castlingRook = null;
+  let originalRookX = null;
+  let originalRookY = null;
+
+  try {
+    if (destinationPiece && destinationPiece.color != piece.color) {
+      this.pieces[this.pieces.indexOf(destinationPiece)] = null;
+    } else if (isEnPassant) {
+      const capturedPawn = this.pieceAtSquare(originalPieceX, y);
+      if (capturedPawn && capturedPawn.color != piece.color) {
+        this.pieces[this.pieces.indexOf(capturedPawn)] = null;
       }
     }
-  }
-  //copying old active bord
-  var AllpiecesBefore = [];
-  for (let i = 0; i < this.pieces.length; i++) {
-    AllpiecesBefore[i] = this.pieces[i];
-  }
 
-  let pieceMove = this.pieceAtSquare(x, y),
-    indexOfDelete = -1;
-  let pieceX = piece.x;
-  let pieceY = piece.y;
-
-  piece.x = x;
-  piece.y = y;
-  if (pieceMove) {
-    if (pieceMove.color != piece.color) {
-      indexOfDelete = AllpiecesBefore.indexOf(pieceMove);
-      this.pieces[AllpiecesBefore.indexOf(pieceMove)] = null;
+    if (isCastling) {
+      castlingRook = destinationPiece;
+      originalRookX = castlingRook.x;
+      originalRookY = castlingRook.y;
+      const kingside = y > originalPieceY;
+      piece.y = kingside ? 7 : 3;
+      castlingRook.y = kingside ? 6 : 4;
+    } else {
+      piece.x = x;
+      piece.y = y;
     }
-  }
 
-  isCheckNow = this.inCheck(king.color, king.x, king.y);
-
-  piece.x = pieceX;
-  piece.y = pieceY;
-  if (indexOfDelete != -1) {
-    this.pieces[indexOfDelete] = AllpiecesBefore[indexOfDelete];
+    return this.inCheck(piece.color, king.x, king.y);
+  } finally {
+    piece.x = originalPieceX;
+    piece.y = originalPieceY;
+    if (castlingRook) {
+      castlingRook.x = originalRookX;
+      castlingRook.y = originalRookY;
+    }
+    this.pieces.length = 0;
+    Array.prototype.push.apply(this.pieces, originalPieces);
   }
-  return isCheckNow;
 };
 
 Board.prototype.playerWon = function (color, reason) {
@@ -558,12 +646,26 @@ Board.prototype.finalizeGame = function (payload) {
   window.BotPlaying = false;
   window.humainIsUpgrading = false;
   window.pendingMoveSoundToken = null;
+  if (typeof window.cancelBotRequest == "function") {
+    window.cancelBotRequest();
+  }
+  // A finished/reset game must not leave WASM searches or queued evaluations
+  // running in the background. Services initialize lazily for the next game or
+  // when the user requests another history evaluation.
+  const stockfishOwner = this.stockfishOwner;
+  if (this.stockfishBotService && typeof this.stockfishBotService.dispose == "function") {
+    this.stockfishBotService.dispose(stockfishOwner);
+  }
+  // Keep the lightweight evaluation client alive after the game so missing
+  // history positions can finish in the background.
+  this.stockfishDisposed = false;
   const latestSnapshot = this.positionHistory && this.positionHistory.length
     ? this.positionHistory[this.positionHistory.length - 1]
     : null;
   if (latestSnapshot) {
     latestSnapshot.clockTimes = this.captureClockTimes();
   }
+  this.queueMissingHistoryEvaluations();
   this.clearPremoveStack();
   this.removeFiftyMoveDrawClaimButton();
   this.removeGameActionControls();
@@ -573,6 +675,11 @@ Board.prototype.finalizeGame = function (payload) {
   if (this.draggableUpdateTimer) {
     clearTimeout(this.draggableUpdateTimer);
     this.draggableUpdateTimer = null;
+  }
+
+  if (this.botMoveTimer) {
+    clearTimeout(this.botMoveTimer);
+    this.botMoveTimer = null;
   }
 
   this.cancelActiveDrag();
@@ -667,6 +774,30 @@ Board.prototype.getLocalActionColor = function () {
   }
 
   return this.turn;
+};
+
+Board.prototype.hasOnlyKing = function (color) {
+  const remaining = (this.pieces || []).filter(function (piece) {
+    return piece && piece.color == color;
+  });
+  return remaining.length == 1 && remaining[0].constructor.name == "King";
+};
+
+Board.prototype.getOnlyKingState = function () {
+  return {
+    white: this.hasOnlyKing("white"),
+    black: this.hasOnlyKing("black"),
+  };
+};
+
+Board.prototype.finishGameOnTime = function (winnerColor) {
+  if (this.hasOnlyKing(winnerColor)) {
+    this.stallMate("Draw by insufficient mating material");
+    return "draw";
+  }
+
+  this.playerWon(winnerColor, "on time");
+  return "win";
 };
 
 Board.prototype.getBotColor = function () {
@@ -1079,6 +1210,228 @@ Board.prototype.coordinatesForSquare = function (square) {
   };
 };
 
+Board.prototype.getThinkingSquareKey = function (x, y) {
+  return `${Number(x)},${Number(y)}`;
+};
+
+Board.prototype.getThinkingArrowKey = function (fromX, fromY, toX, toY) {
+  return `${this.getThinkingSquareKey(fromX, fromY)}>${this.getThinkingSquareKey(toX, toY)}`;
+};
+
+Board.prototype.getThinkingVisualCenter = function (x, y) {
+  const row = this.isFlipped ? 8 - Number(x) : Number(x) - 1;
+  const column = this.isFlipped ? 8 - Number(y) : Number(y) - 1;
+  return { x: column + 0.5, y: row + 0.5 };
+};
+
+Board.prototype.getThinkingInsetPoint = function (from, toward, distance) {
+  const dx = toward.x - from.x;
+  const dy = toward.y - from.y;
+  const length = Math.sqrt(dx * dx + dy * dy);
+  if (!length) return { x: from.x, y: from.y };
+
+  const inset = Number(distance) || 0;
+  return {
+    x: Number((from.x + dx / length * inset).toFixed(4)),
+    y: Number((from.y + dy / length * inset).toFixed(4)),
+  };
+};
+
+Board.prototype.getThinkingArrowPath = function (arrow) {
+  if (!arrow) return "";
+  const start = this.getThinkingVisualCenter(arrow.fromX, arrow.fromY);
+  const end = this.getThinkingVisualCenter(arrow.toX, arrow.toY);
+  const boardDx = Math.abs(Number(arrow.toX) - Number(arrow.fromX));
+  const boardDy = Math.abs(Number(arrow.toY) - Number(arrow.fromY));
+  const isKnightArrow = (boardDx == 2 && boardDy == 1) || (boardDx == 1 && boardDy == 2);
+
+  if (!isKnightArrow) {
+    const insetStart = this.getThinkingInsetPoint(start, end, THINKING_ARROW_VISIBLE_INSET);
+    const insetEnd = this.getThinkingInsetPoint(
+      end,
+      start,
+      THINKING_ARROW_HEAD_FORWARD_LENGTH
+    );
+    return `M ${insetStart.x} ${insetStart.y} L ${insetEnd.x} ${insetEnd.y}`;
+  }
+
+  const visualDx = Math.abs(end.x - start.x);
+  const bend = visualDx == 2
+    ? { x: end.x, y: start.y }
+    : { x: start.x, y: end.y };
+  const insetStart = this.getThinkingInsetPoint(start, bend, THINKING_ARROW_VISIBLE_INSET);
+  const insetEnd = this.getThinkingInsetPoint(
+    end,
+    bend,
+    THINKING_ARROW_HEAD_FORWARD_LENGTH
+  );
+  return `M ${insetStart.x} ${insetStart.y} L ${bend.x} ${bend.y} L ${insetEnd.x} ${insetEnd.y}`;
+};
+
+Board.prototype.ensureThinkingArrowLayer = function () {
+  if (typeof document == "undefined") return null;
+  let layer = document.getElementById("thinkingArrowLayer");
+  if (layer) return layer;
+
+  const boardArea = document.getElementById("boardArea");
+  if (!boardArea) return null;
+  const svgNamespace = "http://www.w3.org/2000/svg";
+  layer = document.createElementNS(svgNamespace, "svg");
+  layer.setAttribute("id", "thinkingArrowLayer");
+  layer.setAttribute("viewBox", "0 0 8 8");
+  layer.setAttribute("preserveAspectRatio", "none");
+  layer.setAttribute("aria-hidden", "true");
+
+  const definitions = document.createElementNS(svgNamespace, "defs");
+  const marker = document.createElementNS(svgNamespace, "marker");
+  marker.setAttribute("id", "thinkingArrowHead");
+  marker.setAttribute("viewBox", "0 0 12 8");
+  // End the rounded shaft inside the rear third of the head. The head hides the
+  // cap, while its pointed tip lands on the destination square's exact center.
+  marker.setAttribute("refX", "4");
+  marker.setAttribute("refY", "4");
+  marker.setAttribute("markerWidth", "0.41");
+  marker.setAttribute("markerHeight", "0.71");
+  marker.setAttribute("markerUnits", "userSpaceOnUse");
+  marker.setAttribute("orient", "auto");
+  marker.setAttribute("preserveAspectRatio", "none");
+  const markerPath = document.createElementNS(svgNamespace, "path");
+  markerPath.setAttribute("d", "M 0 0 L 12 4 L 0 8 Z");
+  markerPath.setAttribute("class", "thinking-arrow-head");
+  marker.appendChild(markerPath);
+  definitions.appendChild(marker);
+  layer.appendChild(definitions);
+
+  const arrows = document.createElementNS(svgNamespace, "g");
+  arrows.setAttribute("id", "thinkingArrowPaths");
+  layer.appendChild(arrows);
+  boardArea.appendChild(layer);
+  return layer;
+};
+
+Board.prototype.renderThinkingHelpers = function () {
+  const squares = this.board && typeof this.board.find == "function"
+    ? this.board.find("td")
+    : $("#board td");
+  squares.removeClass("thinking-square-highlight");
+  for (const key of this.thinkingSquareHighlights || []) {
+    const coordinates = String(key).split(",").map(Number);
+    if (this.isInsideBoard(coordinates[0], coordinates[1])) {
+      this.getSquare(coordinates[0], coordinates[1]).addClass("thinking-square-highlight");
+    }
+  }
+
+  const layer = this.ensureThinkingArrowLayer();
+  if (!layer) return false;
+  const arrowGroup = layer.querySelector("#thinkingArrowPaths");
+  if (!arrowGroup) return false;
+  while (arrowGroup.firstChild) arrowGroup.removeChild(arrowGroup.firstChild);
+
+  const arrows = Array.from((this.thinkingArrows || new Map()).values());
+  if (
+    this.thinkingGesture &&
+    this.isInsideBoard(this.thinkingGesture.toX, this.thinkingGesture.toY) &&
+    (this.thinkingGesture.fromX != this.thinkingGesture.toX || this.thinkingGesture.fromY != this.thinkingGesture.toY)
+  ) {
+    arrows.push(Object.assign({}, this.thinkingGesture, { preview: true }));
+  }
+
+  const svgNamespace = "http://www.w3.org/2000/svg";
+  for (const arrow of arrows) {
+    const path = document.createElementNS(svgNamespace, "path");
+    path.setAttribute("d", this.getThinkingArrowPath(arrow));
+    path.setAttribute(
+      "class",
+      `thinking-arrow${arrow.preview ? " thinking-arrow-preview" : ""}`
+    );
+    path.setAttribute("marker-end", "url(#thinkingArrowHead)");
+    arrowGroup.appendChild(path);
+  }
+  return true;
+};
+
+Board.prototype.toggleThinkingSquare = function (x, y) {
+  if (!this.isInsideBoard(x, y)) return false;
+  const key = this.getThinkingSquareKey(x, y);
+  if (this.thinkingSquareHighlights.has(key)) {
+    this.thinkingSquareHighlights.delete(key);
+  } else {
+    this.thinkingSquareHighlights.add(key);
+  }
+  this.renderThinkingHelpers();
+  return true;
+};
+
+Board.prototype.toggleThinkingArrow = function (fromX, fromY, toX, toY) {
+  if (!this.isInsideBoard(fromX, fromY) || !this.isInsideBoard(toX, toY)) return false;
+  if (fromX == toX && fromY == toY) return false;
+  const key = this.getThinkingArrowKey(fromX, fromY, toX, toY);
+  if (this.thinkingArrows.has(key)) {
+    this.thinkingArrows.delete(key);
+  } else {
+    this.thinkingArrows.set(key, { fromX, fromY, toX, toY });
+  }
+  this.renderThinkingHelpers();
+  return true;
+};
+
+Board.prototype.beginThinkingGesture = function (x, y) {
+  if (window.gameState != "playing" || !this.isInsideBoard(x, y)) return false;
+  this.thinkingGesture = {
+    fromX: x,
+    fromY: y,
+    toX: x,
+    toY: y,
+  };
+  this.renderThinkingHelpers();
+  return true;
+};
+
+Board.prototype.updateThinkingGesture = function (x, y) {
+  if (!this.thinkingGesture || !this.isInsideBoard(x, y)) return false;
+  this.thinkingGesture.toX = x;
+  this.thinkingGesture.toY = y;
+  this.renderThinkingHelpers();
+  return true;
+};
+
+Board.prototype.finishThinkingGesture = function (x, y) {
+  if (!this.thinkingGesture) return false;
+  const origin = this.thinkingGesture;
+  this.thinkingGesture = null;
+  if (!this.isInsideBoard(x, y)) {
+    this.renderThinkingHelpers();
+    return false;
+  }
+  return origin.fromX == x && origin.fromY == y
+    ? this.toggleThinkingSquare(x, y)
+    : this.toggleThinkingArrow(origin.fromX, origin.fromY, x, y);
+};
+
+Board.prototype.cancelThinkingGesture = function () {
+  if (!this.thinkingGesture) return false;
+  this.thinkingGesture = null;
+  this.renderThinkingHelpers();
+  return true;
+};
+
+Board.prototype.hasThinkingHelpers = function () {
+  return !!(
+    (this.thinkingSquareHighlights && this.thinkingSquareHighlights.size) ||
+    (this.thinkingArrows && this.thinkingArrows.size) ||
+    this.thinkingGesture
+  );
+};
+
+Board.prototype.clearThinkingHelpers = function () {
+  const hadThinkingHelpers = this.hasThinkingHelpers();
+  if (this.thinkingSquareHighlights) this.thinkingSquareHighlights.clear();
+  if (this.thinkingArrows) this.thinkingArrows.clear();
+  this.thinkingGesture = null;
+  this.renderThinkingHelpers();
+  return hadThinkingHelpers;
+};
+
 Board.prototype.clearMoveHighlights = function () {
   const squares = this.board && typeof this.board.find == "function"
     ? this.board.find("td")
@@ -1273,13 +1626,21 @@ Board.prototype.updateCapturedPiecesDisplay = function (snapshot) {
   snapshot = snapshot || this.captureCurrentPosition();
   const captured = this.getCapturedPiecesForSnapshot(snapshot);
   const material = { white: captured.black.reduce((s, t) => s + chessRecapPieceValue(t), 0), black: captured.white.reduce((s, t) => s + chessRecapPieceValue(t), 0) };
-  const boardRef = this;
   ["white", "black"].forEach(function (color) {
-    const panel = boardRef.getVisualSideForColor(color) == "top" ? $("#capturedPiecesTop") : $("#capturedPiecesBottom");
-    const piecesTaken = color == "white" ? captured.black : captured.white;
+    // These panels live inside their color's clock block. The clock blocks
+    // themselves swap screen position when playing Black, so ownership must
+    // be color-based rather than inferred from the panel's Top/Bottom id.
+    const panel = color == "white" ? $("#capturedPiecesBottom") : $("#capturedPiecesTop");
+    const capturedColor = color == "white" ? "black" : "white";
+    const piecesTaken = captured[capturedColor];
     const diff = material[color] - material[color == "white" ? "black" : "white"];
-    panel.removeClass("captured-pieces-white captured-pieces-black").addClass(`captured-pieces-${color}`);
-    panel.find(".captured-pieces-icons").html(piecesTaken.map((type) => `<i class="fas ${chessRecapPieceIcon(type)} captured-piece-icon" title="Captured ${type}"></i>`).join(""));
+    panel
+      .removeClass("captured-pieces-white captured-pieces-black")
+      .addClass(`captured-pieces-${capturedColor}`)
+      .attr("aria-label", `${color == "white" ? "White" : "Black"} captured ${capturedColor} pieces`);
+    panel.find(".captured-pieces-icons").html(piecesTaken.map((type) =>
+      `<i class="fas ${chessRecapPieceIcon(type)} captured-piece-icon captured-piece-${capturedColor}" title="Captured ${capturedColor} ${type}"></i>`
+    ).join(""));
     panel.find(".captured-pieces-score").text(diff > 0 ? `+${diff}` : "");
   });
 };
@@ -1319,6 +1680,32 @@ Board.prototype.recordEvaluationPoint = function (evaluation) {
   this.evaluationHistory.sort(function (a, b) { return a.index - b.index; });
   const snapshot = this.positionHistory && this.positionHistory[evaluationIndex];
   if (snapshot) snapshot.evaluation = point;
+  if (window.gameState != "playing" && typeof this.renderEvaluationDriftGraph == "function") {
+    $("#sideEvaluationDriftGraph").html(this.renderEvaluationDriftGraph());
+    this.updateHistoryAnalysisCursor();
+  }
+};
+
+Board.prototype.updateHistoryAnalysisCursor = function () {
+  const index = this.positionHistoryIndex;
+  $("#sideEvaluationDriftGraph .evaluation-drift-cursor").removeClass("evaluation-drift-cursor-current");
+  $(`#sideEvaluationDriftGraph .evaluation-drift-cursor[data-history-index="${index}"]`)
+    .addClass("evaluation-drift-cursor-current");
+  $("#sideGameMoveRecapList .game-recap-move").removeClass("game-recap-move-current").attr("aria-current", null);
+  $(`#sideGameMoveRecapList .game-recap-move[data-history-index="${index}"]`)
+    .addClass("game-recap-move-current")
+    .attr("aria-current", "step");
+};
+
+Board.prototype.queueMissingHistoryEvaluations = function () {
+  const service = this.stockfishEvaluationService;
+  if (!service || typeof service.analyze != "function") return false;
+  for (let index = 0; index < (this.positionHistory || []).length; index++) {
+    const snapshot = this.positionHistory[index];
+    if (!snapshot || snapshot.evaluation) continue;
+    service.analyze(Object.assign({}, snapshot, { positionHistoryIndex: index }), this.stockfishOwner);
+  }
+  return true;
 };
 
 Board.prototype.recordCurrentPosition = function (options) {
@@ -1352,10 +1739,11 @@ Board.prototype.recordCurrentPosition = function (options) {
   $("#game").removeClass("history-preview");
   this.updateHistoryNavigationControls();
   this.updateCapturedPiecesDisplay(snapshot);
-  if (window.StockfishChess && typeof window.StockfishChess.analyze == "function") {
-    window.StockfishChess.analyze(Object.assign({}, snapshot, {
+  const evaluationService = this.stockfishEvaluationService;
+  if (!this.stockfishDisposed && evaluationService && typeof evaluationService.analyze == "function") {
+    evaluationService.analyze(Object.assign({}, snapshot, {
       positionHistoryIndex: this.positionHistoryIndex,
-    }));
+    }), this.stockfishOwner);
   }
   return snapshot;
 };
@@ -1564,11 +1952,25 @@ Board.prototype.applyPositionSnapshot = function (snapshot) {
   this.updateHistoryNavigationControls();
   if (snapshot.evaluation && typeof window.updateEvaluationBar == "function") {
     window.updateEvaluationBar(Object.assign({}, snapshot.evaluation, { source: "history" }));
+  } else if (typeof window.showPendingEvaluationBar == "function") {
+    window.showPendingEvaluationBar();
   }
-  if (window.StockfishChess && typeof window.StockfishChess.analyze == "function") {
-    window.StockfishChess.analyze(Object.assign({}, snapshot, {
+  let evaluationService = this.stockfishEvaluationService;
+  if (
+    this.stockfishDisposed &&
+    window.board === this &&
+    window.gameState != "playing" &&
+    evaluationService &&
+    typeof evaluationService.claim == "function"
+  ) {
+    // Post-game history analysis may reopen this board's lightweight port.
+    // The owner check still prevents an obsolete board from reclaiming it.
+    this.stockfishDisposed = !evaluationService.claim(this.stockfishOwner);
+  }
+  if (!this.stockfishDisposed && evaluationService && typeof evaluationService.analyze == "function") {
+    evaluationService.analyze(Object.assign({}, snapshot, {
       positionHistoryIndex: this.positionHistoryIndex,
-    }));
+    }), this.stockfishOwner);
   }
   return true;
 };
@@ -1672,6 +2074,8 @@ Board.prototype.previewPositionAt = function (index) {
     this.playHistoryPreviewSound(previousSnapshot, snapshot);
   }
 
+  this.updateHistoryAnalysisCursor();
+
   return applied;
 };
 
@@ -1718,6 +2122,11 @@ Board.prototype.promotePawn = function (pawn, square, PieceType) {
 
   targetSquare.empty();
   let promotedPiece = new PieceType(pawn.x, pawn.y, pawn.color);
+  // A promotion replaces the model object, but any later moves in the premove
+  // chain still belong to this same logical piece.
+  if (pawn.premoveId) {
+    promotedPiece.premoveId = pawn.premoveId;
+  }
   this.add(promotedPiece);
   return promotedPiece;
 };
@@ -1920,6 +2329,27 @@ Board.prototype.finishTurnAfterLegalMove = function (drawByRepetitionReason, mov
 
   this.updateFiftyMoveDrawClaimButton();
   this.updateGameActionControls();
+  if (window.isGameVsBot && this.turn == this.getBotColor()) {
+    this.scheduleBotMove(this.turn);
+  }
+  return true;
+};
+
+Board.prototype.scheduleBotMove = function (color) {
+  if (!window.isGameVsBot || window.gameState != "playing") return false;
+  if (this.botMoveTimer) clearTimeout(this.botMoveTimer);
+
+  const boardRef = this;
+  this.botMoveTimer = setTimeout(function () {
+    boardRef.botMoveTimer = null;
+    if (
+      window.gameState == "playing" &&
+      (!window.board || window.board === boardRef) &&
+      boardRef.turn == color
+    ) {
+      botMove(boardRef, color);
+    }
+  }, 0);
   return true;
 };
 
@@ -1939,6 +2369,53 @@ Board.prototype.stallMate = function (reason) {
     playChessSound(stallMate);
   }
   this.broadcastGameOver(payload, options, shouldAnnounce);
+};
+
+Board.prototype.renderEvaluationDriftGraph = function () {
+  const points = (this.evaluationHistory || []).slice().sort((a, b) => a.index - b.index);
+  const width = 420, height = 120, graphInset = 5;
+  if (!points.length) return '<div class="evaluation-drift-empty">Analyzing game positions…</div>';
+  const maxIndex = Math.max(1, (this.positionHistory || []).length - 1);
+  const normalized = points.map(function (point) {
+    const cp = point.type == "mate" ? (point.whiteCp > 0 ? 10000 : -10000) : point.whiteCp;
+    const clamped = Math.max(-1000, Math.min(1000, cp || 0));
+    const y = height - ((clamped + 1000) / 2000) * height;
+    return {
+      index: point.index || 0,
+      x: graphInset + ((point.index || 0) / maxIndex) * (width - graphInset * 2),
+      // A forced mate is an infinite evaluation and therefore owns the full
+      // graph height. Ordinary capped centipawn scores remain slightly inset.
+      y: point.type == "mate"
+        ? (point.whiteCp > 0 ? 0 : height)
+        : Math.max(graphInset, Math.min(height - graphInset, y)),
+    };
+  });
+  const line = normalized.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" ");
+  const reversedLine = normalized.slice().reverse().map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" ");
+  const first = normalized[0];
+  const latest = normalized[normalized.length - 1];
+  const blackArea = `0,0 ${width},0 ${width},${latest.y.toFixed(1)} ${reversedLine} 0,${first.y.toFixed(1)}`;
+  const whiteArea = `0,${first.y.toFixed(1)} ${line} ${width},${latest.y.toFixed(1)} ${width},${height} 0,${height}`;
+  const historyCursors = (this.positionHistory || []).map((snapshot, historyIndex) => {
+    const exact = normalized.find((point) => point.index == historyIndex);
+    let cursorY = exact ? exact.y : null;
+    if (cursorY == null) {
+      const before = normalized.slice().reverse().find((point) => point.index < historyIndex) || normalized[0];
+      const after = normalized.find((point) => point.index > historyIndex) || normalized[normalized.length - 1];
+      const span = after.index - before.index;
+      const progress = span > 0 ? (historyIndex - before.index) / span : 0;
+      cursorY = before.y + (after.y - before.y) * progress;
+    }
+    const cursorX = graphInset + (historyIndex / maxIndex) * (width - graphInset * 2);
+    return `<line class="evaluation-drift-cursor" data-history-index="${historyIndex}" x1="${cursorX.toFixed(1)}" y1="${cursorY.toFixed(1)}" x2="${cursorX.toFixed(1)}" y2="${cursorY.toFixed(1)}" vector-effect="non-scaling-stroke"></line>`;
+  }).join("");
+  const hitAreas = normalized.map((point, arrayIndex) => {
+    const left = arrayIndex == 0 ? 0 : (normalized[arrayIndex - 1].x + point.x) / 2;
+    const right = arrayIndex == normalized.length - 1 ? width : (point.x + normalized[arrayIndex + 1].x) / 2;
+    const historyIndex = points[arrayIndex].index;
+    return `<rect class="evaluation-drift-hit" data-history-index="${historyIndex}" data-point-x="${point.x.toFixed(1)}" x="${left.toFixed(1)}" y="0" width="${Math.max(0, right - left).toFixed(1)}" height="${height}" role="button" tabindex="0" aria-label="View position ${historyIndex}"></rect>`;
+  }).join("");
+  return `<svg class="evaluation-drift-graph" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="Evaluation drift graph"><rect class="evaluation-drift-bg" x="0" y="0" width="${width}" height="${height}"></rect><polygon class="evaluation-drift-area-black" points="${blackArea}"></polygon><polygon class="evaluation-drift-area-white" points="${whiteArea}"></polygon><line class="evaluation-drift-mid" x1="0" y1="${height / 2}" x2="${width}" y2="${height / 2}"></line><polyline class="evaluation-drift-line" points="${line}"></polyline><line class="evaluation-drift-hover-line" x1="0" y1="0" x2="0" y2="${height}"></line>${historyCursors}${hitAreas}</svg>`;
 };
 
 Board.prototype.showGameOverOverlay = function (resultContentHtml) {
@@ -1967,18 +2444,7 @@ Board.prototype.showGameOverOverlay = function (resultContentHtml) {
   window.stopShowingGameResultHub = stopShowingResultHub;
 
   function renderEvaluationDriftGraph() {
-    const points = (boardObject.evaluationHistory || []).slice().sort((a, b) => a.index - b.index);
-    const width = 420, height = 120;
-    if (!points.length) return '<div class="evaluation-drift-empty">No engine evaluation samples were recorded.</div>';
-    const maxIndex = Math.max(1, points.reduce((max, point) => Math.max(max, point.index || 0), 0));
-    const normalized = points.map(function (point) {
-      const cp = point.type == "mate" ? (point.whiteCp > 0 ? 10000 : -10000) : point.whiteCp;
-      const clamped = Math.max(-1000, Math.min(1000, cp || 0));
-      return { x: ((point.index || 0) / maxIndex) * width, y: height - ((clamped + 1000) / 2000) * height };
-    });
-    const line = normalized.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
-    const boundary = normalized.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
-    return `<svg class="evaluation-drift-graph" viewBox="0 0 ${width} ${height}" role="img" aria-label="Evaluation drift graph"><rect class="evaluation-drift-bg" x="0" y="0" width="${width}" height="${height}"></rect><polygon class="evaluation-drift-fill-black" points="0,0 ${boundary} ${width},0"></polygon><polygon class="evaluation-drift-fill-white" points="0,${height} ${boundary} ${width},${height}"></polygon><polyline class="evaluation-drift-line" points="${line}"></polyline><line class="evaluation-drift-mid" x1="0" y1="${height / 2}" x2="${width}" y2="${height / 2}"></line></svg>`;
+    return boardObject.renderEvaluationDriftGraph();
   }
 
   function renderMoveRecap() {
@@ -2013,8 +2479,10 @@ Board.prototype.showGameOverOverlay = function (resultContentHtml) {
   }
 
   overlay.find("#results_content").html(resultContentHtml);
+  $("#sideGameResult").html(resultContentHtml);
   $("#sideEvaluationDriftGraph").html(renderEvaluationDriftGraph());
   $("#sideGameMoveRecapList").html(renderMoveRecap());
+  boardObject.updateHistoryAnalysisCursor();
   $("#sideGameAnalysisPanel").css("display", "block");
   resultsPanel.css("display", "block");
 
@@ -2024,6 +2492,34 @@ Board.prototype.showGameOverOverlay = function (resultContentHtml) {
     const index = Number($(this).attr("data-history-index"));
     if (Number.isFinite(index)) { hideResultHubForAnalysis(); boardObject.previewPositionAt(index); }
   });
+
+  const driftGraph = $("#sideEvaluationDriftGraph");
+  const clearDriftHover = function () {
+    driftGraph.find(".evaluation-drift-hover-line").removeClass("evaluation-drift-hover-line-visible");
+  };
+  driftGraph
+    .off("mouseenter.evaluationDrift", ".evaluation-drift-hit")
+    .on("mouseenter.evaluationDrift", ".evaluation-drift-hit", function () {
+      const hit = $(this);
+      const x = hit.attr("data-point-x");
+      driftGraph.find(".evaluation-drift-hover-line")
+        .attr({ x1: x, x2: x })
+        .addClass("evaluation-drift-hover-line-visible");
+    })
+    .off("mouseleave.evaluationDrift")
+    .on("mouseleave.evaluationDrift", clearDriftHover)
+    .off("click.evaluationDrift", ".evaluation-drift-hit")
+    .on("click.evaluationDrift", ".evaluation-drift-hit", function (event) {
+      event.preventDefault(); event.stopPropagation();
+      const index = Number($(this).attr("data-history-index"));
+      if (Number.isFinite(index)) { hideResultHubForAnalysis(); boardObject.previewPositionAt(index); }
+    })
+    .off("keydown.evaluationDrift", ".evaluation-drift-hit")
+    .on("keydown.evaluationDrift", ".evaluation-drift-hit", function (event) {
+      if (event.key != "Enter" && event.key != " ") return;
+      event.preventDefault();
+      $(this).trigger("click.evaluationDrift");
+    });
 
   resultsPanel.find("#dismissResultsBtn").off("click").on("click", function (event) {
     event.preventDefault();
@@ -2059,6 +2555,7 @@ Board.prototype.showGameOverOverlay = function (resultContentHtml) {
 };
 
 Board.prototype.resetGame = function () {
+  const resetOptions = arguments[0] || {};
   if (typeof window.stopShowingGameResultHub == "function") {
     window.stopShowingGameResultHub();
   }
@@ -2088,7 +2585,7 @@ Board.prototype.resetGame = function () {
     window.resetClockVisuals();
   }
 
-  if (window.gameSocket && window.gameSocket.readyState === 1) {
+  if (!resetOptions.preserveOnlineConnection && window.gameSocket && window.gameSocket.readyState === 1) {
     try {
       window.gameSocket.close();
     } catch (e) {
@@ -2097,7 +2594,7 @@ Board.prototype.resetGame = function () {
     window.gameSocket = null;
   }
 
-  if (typeof window.stopClockSync == "function") {
+  if (!resetOptions.preserveOnlineConnection && typeof window.stopClockSync == "function") {
     window.stopClockSync();
   }
 
@@ -2166,156 +2663,16 @@ Board.prototype.inCheck = function (color, Kx, Ky) {
   return false;
 };
 Board.prototype.hasAuthMoves = function (color) {
-  let king = null;
   for (const piece of this.pieces) {
-    if (piece) {
-      if (piece.constructor.name == "King" && piece.color == color) {
-        king = piece;
-        break;
-      }
-    }
-  }
-  //copying old active bord
-  var AllpiecesBefore = [];
-  for (let i = 0; i < this.pieces.length; i++) {
-    AllpiecesBefore[i] = this.pieces[i];
-  }
-  // look only for how to prevent it to the king
-  for (const piece of AllpiecesBefore) {
-    if (piece) {
-      let oldAttacks = [];
-      Object.assign(oldAttacks, piece.attackingSquares);
-      let pieceX = piece.x,
-        pieceY = piece.y;
-
-      if (piece.color == color) {
-        if (piece.constructor.name != "Pawn") {
-          for (const attack of oldAttacks) {
-            let indexOfDelete = -1;
-            let p = this.pieceAtSquare(attack.x, attack.y);
-            if (p) {
-              if (p.color == color) {
-                continue;
-              } else {
-                indexOfDelete = AllpiecesBefore.indexOf(p);
-                this.pieces[AllpiecesBefore.indexOf(p)] = null;
-              }
-            }
-            piece.x = attack.x;
-            piece.y = attack.y;
-            piece.recalculateAttackingSquares(this);
-
-            let kingX = king.x,
-              kingY = king.y;
-            if (piece.constructor.name == "King") {
-              kingX = attack.x;
-              kingY = attack.y;
-            }
-            if (!this.inCheck(color, kingX, kingY)) {
-              //recorrect changed data
-              piece.x = pieceX;
-              piece.y = pieceY;
-              piece.attackingSquares = oldAttacks;
-              this.pieces = AllpiecesBefore;
-              return true;
-            }
-            if (indexOfDelete != -1) {
-              this.pieces[indexOfDelete] = AllpiecesBefore[indexOfDelete];
-            }
-          }
-        } else if (piece.constructor.name == "Pawn") {
-          let forwardOnly;
-          if (piece.color == "black") {
-            forwardOnly = function (a, b) {
-              return a + b;
-            };
-          } else if (piece.color == "white") {
-            forwardOnly = function (a, b) {
-              return a - b;
-            };
-          }
-
-          let pieceMove;
-
-          pieceMove = this.pieceAtSquare(forwardOnly(piece.x, 1), piece.y);
-          piece.x = forwardOnly(piece.x, 1);
-          if (!pieceMove) {
-            if (!this.inCheck(color, king.x, king.y)) {
-              //recorrect changed data
-              piece.x = pieceX;
-              piece.y = pieceY;
-              piece.attackingSquares = oldAttacks;
-              this.pieces = AllpiecesBefore;
-              return true;
-            }
-            if (
-              (piece.color == "black" && piece.x == 2) ||
-              (piece.color == "white" && piece.x == 7)
-            ) {
-              pieceMove = this.pieceAtSquare(forwardOnly(piece.x, 2), piece.y);
-              piece.x = forwardOnly(piece.x, 2);
-              if (!pieceMove) {
-                if (!this.inCheck(color, king.x, king.y)) {
-                  //recorrect changed data
-                  piece.x = pieceX;
-                  piece.y = pieceY;
-                  piece.attackingSquares = oldAttacks;
-                  this.pieces = AllpiecesBefore;
-                  return true;
-                }
-              }
-            }
-          }
-          piece.x = pieceX;
-          piece.y = pieceY;
-          pieceMove = this.pieceAtSquare(forwardOnly(piece.x, 1), piece.y + 1);
-          let indexOfDelete = -1;
-          piece.x = forwardOnly(piece.x, 1);
-          piece.y = piece.y + 1;
-          if (pieceMove) {
-            if (pieceMove.color != color) {
-              indexOfDelete = AllpiecesBefore.indexOf(pieceMove);
-              this.pieces[AllpiecesBefore.indexOf(pieceMove)] = null;
-              if (!this.inCheck(color, king.x, king.y)) {
-                //recorrect changed data
-                piece.x = pieceX;
-                piece.y = pieceY;
-                piece.attackingSquares = oldAttacks;
-                this.pieces = AllpiecesBefore;
-                return true;
-              }
-            }
-          }
-          piece.x = pieceX;
-          piece.y = pieceY;
-          pieceMove = this.pieceAtSquare(forwardOnly(piece.x, 1), piece.y - 1);
-          piece.x = forwardOnly(piece.x, 1);
-          piece.y = piece.y - 1;
-          if (pieceMove) {
-            if (pieceMove.color != color) {
-              indexOfDelete = AllpiecesBefore.indexOf(pieceMove);
-              this.pieces[AllpiecesBefore.indexOf(pieceMove)] = null;
-              if (!this.inCheck(color, king.x, king.y)) {
-                //recorrect changed data
-                piece.x = pieceX;
-                piece.y = pieceY;
-                piece.attackingSquares = oldAttacks;
-                this.pieces = AllpiecesBefore;
-                return true;
-              }
-            }
-          }
-          if (indexOfDelete != -1) {
-            this.pieces[indexOfDelete] = AllpiecesBefore[indexOfDelete];
-          }
+    if (!piece || piece.color != color) continue;
+    for (let x = 1; x <= 8; x++) {
+      for (let y = 1; y <= 8; y++) {
+        if (piece.isLegal(this, x, y) && !this.isCheckIfMovePlayed(piece, x, y)) {
+          return true;
         }
       }
-      piece.x = pieceX;
-      piece.y = pieceY;
-      piece.attackingSquares = oldAttacks;
     }
   }
-  this.pieces = AllpiecesBefore;
   return false;
 };
 Board.prototype.resetAttacks = function () {
@@ -2334,18 +2691,37 @@ Board.prototype.draggableOptions = function () {
       const piece = $(this).data("piece");
       const activeColor = boardRef.getActiveDraggableColor();
 
-      if (!piece || !activeColor || piece.color != activeColor) {
+      if (!piece || !activeColor || piece.color != activeColor || !boardRef.isPremovePieceAvailable(piece)) {
         boardRef.resetPiecePosition(piece);
         return false;
       }
 
-      if (window.isGameOnline && boardRef.turn != piece.color && boardRef.premoveStack && boardRef.premoveStack.length) {
+      if ((window.isGameOnline || window.isGameVsBot) && boardRef.turn != piece.color && boardRef.premoveStack && boardRef.premoveStack.length) {
         const key = boardRef.getPremovePieceKey(piece);
         const visual = boardRef.premoveVisualPositions.get(key);
         if (visual) {
-          boardRef.getSquare(visual.x, visual.y).append($(piece.element).detach());
+          const visualSquare = boardRef.getSquare(visual.x, visual.y);
+          // renderPremoveVisuals normally put the element here before dragging
+          // began. Reparenting after jQuery UI caches its pointer offset makes
+          // the piece jump away from the cursor.
+          const pieceElementNode = $(piece.element)[0];
+          if (visualSquare.length && pieceElementNode && !$.contains(visualSquare[0], pieceElementNode)) {
+            visualSquare.append($(piece.element).detach());
+          }
         }
       }
+
+      const pieceElement = $(this);
+      let draggableInstance = null;
+      try {
+        draggableInstance = pieceElement.draggable("instance");
+      } catch (e) {
+        // Fall through to the data keys used by older jQuery UI releases.
+      }
+      draggableInstance = draggableInstance ||
+        pieceElement.data("ui-draggable") ||
+        pieceElement.data("draggable");
+      centerDraggableOnPointer(draggableInstance);
     },
     drag: onPieceDrag,
     accept: "td",
@@ -2353,6 +2729,135 @@ Board.prototype.draggableOptions = function () {
     stop: onPieceStopDrag,
     scroll: false,
   };
+};
+
+Board.prototype.getClickMoveSquares = function () {
+  return this.board && typeof this.board.find == "function"
+    ? this.board.find("td")
+    : $("#board td");
+};
+
+Board.prototype.getClickMovePieces = function () {
+  return this.board && typeof this.board.find == "function"
+    ? this.board.find("i")
+    : $("#board i");
+};
+
+Board.prototype.clearClickMoveSelection = function () {
+  const selectedPiece = this.selectedClickPiece;
+  this.selectedClickPiece = null;
+  if (selectedPiece && selectedPiece.element) {
+    $(selectedPiece.element).removeClass("click-move-selected-piece");
+  }
+  const squares = this.getClickMoveSquares();
+  squares.removeClass("possibleMove");
+  this.getClickMovePieces().removeClass("click-move-selected-piece");
+  if (typeof squares.removeAttr == "function") {
+    squares.removeAttr("aria-selected");
+  }
+};
+
+Board.prototype.showClickMoveSelection = function (piece, square) {
+  if (!piece || !square || !square.length) return false;
+
+  this.clearClickMoveSelection();
+  this.selectedClickPiece = piece;
+  square.attr("aria-selected", "true");
+  $(piece.element).addClass("click-move-selected-piece");
+
+  if (!this.canQueuePremoveForPiece(piece)) {
+    for (let x = 1; x <= 8; x++) {
+      for (let y = 1; y <= 8; y++) {
+        if (piece.isLegal(this, x, y) && !this.isCheckIfMovePlayed(piece, x, y)) {
+          this.getSquare(x, y).addClass("possibleMove");
+        }
+      }
+    }
+  }
+
+  return true;
+};
+
+Board.prototype.dropPieceOnSquare = function (piece, square) {
+  if (!piece || !square || !square.length || typeof square.droppable != "function") {
+    return false;
+  }
+
+  const dropHandler = square.droppable("option", "drop");
+  if (typeof dropHandler != "function") return false;
+
+  const previousAnimationPreference = window.shouldAnimateProgrammaticMove;
+  window.shouldAnimateProgrammaticMove = true;
+  try {
+    dropHandler.call(
+      square[0],
+      { stopPropagation: function () {} },
+      { draggable: $(piece.element) }
+    );
+  } finally {
+    window.shouldAnimateProgrammaticMove = previousAnimationPreference;
+  }
+
+  return true;
+};
+
+Board.prototype.handleSquareClick = function (square, clickedPiece) {
+  square = $(square);
+  if (
+    !square ||
+    !square.length ||
+    window.gameState != "playing" ||
+    this.isHistoryPreview ||
+    window.humainIsUpgrading ||
+    $(".popover.show").length > 0
+  ) {
+    this.clearClickMoveSelection();
+    return false;
+  }
+
+  const activeColor = this.getActiveDraggableColor();
+  if (!activeColor) {
+    this.clearClickMoveSelection();
+    return false;
+  }
+
+  const selectedPiece = this.selectedClickPiece;
+  if (!selectedPiece) {
+    const coordinates = this.coordinatesForSquare(square);
+    const squarePiece = this.isInsideBoard(coordinates.x, coordinates.y)
+      ? (this.premoveStack && this.premoveStack.length
+        ? this.getPremoveVisualOccupant(coordinates.x, coordinates.y, null)
+        : this.pieceAtSquare(coordinates.x, coordinates.y))
+      : null;
+    const selectablePiece = squarePiece || clickedPiece;
+    return selectablePiece && selectablePiece.color == activeColor && this.isPremovePieceAvailable(selectablePiece)
+      ? this.showClickMoveSelection(selectablePiece, square)
+      : false;
+  }
+
+  // Once selected, every following square click is a destination attempt.
+  // This is important for premove captures where the destination contains a
+  // rendered piece; changing selection here would make the capture impossible.
+  this.clearClickMoveSelection();
+  return this.dropPieceOnSquare(selectedPiece, square);
+};
+
+Board.prototype.bindClickToMove = function () {
+  if (!this.board || typeof this.board.off != "function" || typeof this.board.on != "function") {
+    return false;
+  }
+
+  const boardRef = this;
+  this.board
+    .off("click.chessClickMove", "td")
+    .on("click.chessClickMove", "td", function (event) {
+      const pieceElement = event.target && typeof event.target.closest == "function"
+        ? event.target.closest("i")
+        : null;
+      const clickedPiece = pieceElement ? $(pieceElement).data("piece") : null;
+      boardRef.handleSquareClick(this, clickedPiece || null);
+    });
+  return true;
 };
 
 Board.prototype.cancelActiveDrag = function () {
@@ -2365,12 +2870,18 @@ Board.prototype.cancelActiveDrag = function () {
   }
 
   $(".possibleMove").removeClass("possibleMove");
+  this.clearClickMoveSelection();
 
+  this.isCancellingDrag = true;
   try {
-    $(document).trigger("mouseup");
-    $(window).trigger("mouseup");
-  } catch (e) {
-    // If jQuery UI is not active, there is nothing to cancel.
+    try {
+      $(document).trigger("mouseup");
+      $(window).trigger("mouseup");
+    } catch (e) {
+      // If jQuery UI is not active, there is nothing to cancel.
+    }
+  } finally {
+    this.isCancellingDrag = false;
   }
 
   const draggingPieces = $(".ui-draggable-dragging");
@@ -2398,6 +2909,7 @@ Board.prototype.cancelActiveDrag = function () {
       .removeClass("ui-draggable ui-draggable-handle ui-draggable-dragging")
       .css({ top: "0px", left: "0px" });
   });
+
 };
 
 Board.prototype.disableDraggables = function (elements) {
@@ -2428,12 +2940,18 @@ Board.prototype.enableDraggables = function (elements) {
     const element = $(this);
     if (typeof element.draggable != "function") return;
 
-    try {
-      if (element.data("ui-draggable") || element.data("draggable")) {
-        element.draggable("destroy");
+    if (element.hasClass("ui-draggable-dragging")) return;
+
+    const hasDraggable = !!(element.data("ui-draggable") || element.data("draggable"));
+    if (hasDraggable) {
+      try {
+        // Preserve an in-progress drag. Recreating the widget here makes a
+        // held piece snap back whenever a remote move refreshes the board.
+        element.draggable("option", "disabled", false);
+        return;
+      } catch (e) {
+        // Re-initialize below if the existing widget is stale.
       }
-    } catch (e) {
-      // Re-initialize below if the previous draggable instance was stale.
     }
 
     element.css({ top: "0px", left: "0px" }).draggable(options);
@@ -2450,7 +2968,9 @@ Board.prototype.getActiveDraggableColor = function () {
 
   if (window.isGameVsBot) {
     const playAs = window.playAs || this.playAs || "white";
-    return this.turn == playAs ? playAs : null;
+    // Keep the human pieces draggable during the bot's turn so drops can be
+    // recorded as premoves. Local same-device games remain strictly turn-based.
+    return playAs;
   }
 
   return this.turn;
@@ -2459,6 +2979,7 @@ Board.prototype.getActiveDraggableColor = function () {
 Board.prototype.canQueuePremoveForPiece = function (piece) {
   if (!piece || window.gameState != "playing" || this.isHistoryPreview) return false;
   if (window.humainIsUpgrading || $(".popover.show").length > 0) return false;
+  if (!this.isPremovePieceAvailable(piece)) return false;
 
   if (window.isGameOnline) {
     const playAs = window.playAs || this.playAs;
@@ -2568,7 +3089,8 @@ Board.prototype.restorePremovePieceElementsToActualSquares = function () {
     const key = piece.premoveId || "";
     if (!key || !this.premoveVisualPositions || !this.premoveVisualPositions.has(key)) continue;
     const square = this.isInsideBoard(piece.x, piece.y) ? this.getSquare(piece.x, piece.y) : null;
-    if (square && square.length && !$.contains(square[0], piece.element)) {
+    const pieceElementNode = $(piece.element)[0];
+    if (square && square.length && pieceElementNode && !$.contains(square[0], pieceElementNode)) {
       square.append($(piece.element).detach());
     }
     this.resetPiecePosition(piece);
@@ -2578,7 +3100,8 @@ Board.prototype.restorePremovePieceElementsToActualSquares = function () {
 Board.prototype.restoreSinglePremovePieceElementToActualSquare = function (piece) {
   if (!piece || !piece.element) return;
   const square = this.isInsideBoard(piece.x, piece.y) ? this.getSquare(piece.x, piece.y) : null;
-  if (square && square.length && !$.contains(square[0], piece.element)) {
+  const pieceElementNode = $(piece.element)[0];
+  if (square && square.length && pieceElementNode && !$.contains(square[0], pieceElementNode)) {
     square.append($(piece.element).detach());
   }
   this.resetPiecePosition(piece);
@@ -2612,14 +3135,144 @@ Board.prototype.withPremoveVirtualPiecePositions = function (callback) {
   }
 };
 
-Board.prototype.isPremoveShapeLegal = function (piece, fromX, fromY, toX, toY) {
+Board.prototype.getPremoveVirtualPieceType = function (piece) {
+  if (!piece) return "";
+  const key = piece.premoveId || "";
+  let type = piece.constructor.name;
+  for (const item of this.premoveStack || []) {
+    if (item && item.key == key && item.promotion) {
+      type = item.promotion;
+    }
+  }
+  return type;
+};
+
+Board.prototype.isAuthoritativePieceLive = function (piece) {
+  if (!piece || !this.pieces || this.pieces.indexOf(piece) == -1) return false;
+  if (!this.isInsideBoard(piece.x, piece.y)) return false;
+  return this.pieceAtSquare(piece.x, piece.y) === piece;
+};
+
+Board.prototype.getPremoveVisualOccupant = function (x, y, excludedPiece) {
+  const state = this.buildPremoveVirtualState();
+  for (const entry of state.positions.entries()) {
+    const piece = entry[0];
+    const position = entry[1];
+    if (piece != excludedPiece && position.x == x && position.y == y) return piece;
+  }
+  return null;
+};
+
+Board.prototype.isPremovePieceAvailable = function (piece) {
+  if (!this.isAuthoritativePieceLive(piece)) return false;
+  if (!this.premoveStack || !this.premoveStack.length) return true;
+  return this.buildPremoveVirtualState().positions.has(piece);
+};
+
+Board.prototype.buildPremoveVirtualState = function () {
+  const requestedLimit = arguments.length ? Number(arguments[0]) : (this.premoveStack || []).length;
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(0, Math.min(requestedLimit, (this.premoveStack || []).length))
+    : (this.premoveStack || []).length;
+  const positions = new Map();
+  const pieceTypes = new Map();
+
+  for (const piece of this.pieces || []) {
+    if (piece) {
+      positions.set(piece, { x: piece.x, y: piece.y });
+      pieceTypes.set(piece, piece.constructor.name);
+    }
+  }
+
+  for (let index = 0; index < limit; index++) {
+    const item = this.premoveStack[index];
+    if (!item || !item.key) continue;
+    const movingPiece = (this.pieces || []).find((piece) => piece && piece.premoveId == item.key);
+    if (!movingPiece || !positions.has(movingPiece)) continue;
+
+    const origin = positions.get(movingPiece);
+    const destination = {
+      x: item.visualToX || item.toX,
+      y: item.visualToY || item.toY,
+    };
+
+    if (item.isCastling && item.rookKey) {
+      const rook = (this.pieces || []).find((piece) => piece && piece.premoveId == item.rookKey);
+      for (const clearedKey of item.castlingClearedKeys || []) {
+        const clearedPiece = (this.pieces || []).find((piece) => piece && piece.premoveId == clearedKey);
+        if (clearedPiece) positions.delete(clearedPiece);
+      }
+      positions.set(movingPiece, destination);
+      if (rook && positions.has(rook)) {
+        positions.set(rook, { x: item.rookToX, y: item.rookToY });
+      }
+      continue;
+    }
+
+    let capturedAtDestination = false;
+    for (const entry of positions.entries()) {
+      const occupant = entry[0];
+      const position = entry[1];
+      if (
+        occupant != movingPiece &&
+        position.x == destination.x &&
+        position.y == destination.y
+      ) {
+        const movingType = pieceTypes.get(movingPiece);
+        // Pawns only capture diagonally. A speculative forward premove into
+        // an occupied square must remain blocked instead of deleting it.
+        if (movingType != "Pawn" || origin.y != destination.y) {
+          // Captures belong to this exact stack step. Removing the victim here
+          // prevents a later premove from resurrecting it at its old square.
+          positions.delete(occupant);
+          capturedAtDestination = true;
+        }
+        break;
+      }
+    }
+
+    if (pieceTypes.get(movingPiece) == "Pawn" && origin.y != destination.y && !capturedAtDestination) {
+      // Preserve the same ordered semantics for a possible en-passant premove.
+      for (const entry of positions.entries()) {
+        const occupant = entry[0];
+        const position = entry[1];
+        if (
+          occupant != movingPiece &&
+          occupant.color != movingPiece.color &&
+          pieceTypes.get(occupant) == "Pawn" &&
+          position.x == origin.x &&
+          position.y == destination.y
+        ) {
+          positions.delete(occupant);
+          break;
+        }
+      }
+    }
+    positions.set(movingPiece, destination);
+    if (item.promotion) pieceTypes.set(movingPiece, item.promotion);
+  }
+
+  return { positions: positions };
+};
+
+Board.prototype.getPremoveOccupantBeforeItem = function (itemIndex, x, y, excludedPiece) {
+  const state = this.buildPremoveVirtualState(itemIndex);
+  for (const entry of state.positions.entries()) {
+    const piece = entry[0];
+    const position = entry[1];
+    if (piece != excludedPiece && position.x == x && position.y == y) return piece;
+  }
+  return null;
+};
+
+Board.prototype.isPremoveShapeLegal = function (piece, fromX, fromY, toX, toY, pieceType) {
   if (!piece || !this.isInsideBoard(fromX, fromY) || !this.isInsideBoard(toX, toY)) return false;
   if (fromX == toX && fromY == toY) return false;
   const dx = toX - fromX;
   const dy = toY - fromY;
   const absDx = Math.abs(dx);
   const absDy = Math.abs(dy);
-  const type = piece.constructor.name;
+  const type = pieceType || piece.constructor.name;
 
   if (type == "King" && fromY == 5 && fromX == toX && (Math.abs(dy) == 2 || toY == 1 || toY == 8)) {
     return true;
@@ -2646,10 +3299,15 @@ Board.prototype.clearPremoveStack = function () {
   if (this.premoveVisualPositions && this.premoveVisualPositions.size) {
     for (const piece of this.pieces || []) {
       if (!piece || !piece.element) continue;
+      if ($(piece.element).hasClass("ui-draggable-dragging")) {
+        piece.restoreAfterActiveDrag = true;
+        continue;
+      }
       const key = piece.premoveId || "";
       if (key && this.premoveVisualPositions.has(key)) {
         const square = this.isInsideBoard(piece.x, piece.y) ? this.getSquare(piece.x, piece.y) : null;
-        if (square && square.length && !$.contains(square[0], piece.element)) {
+        const pieceElementNode = $(piece.element)[0];
+        if (square && square.length && pieceElementNode && !$.contains(square[0], pieceElementNode)) {
           square.append($(piece.element).detach());
         }
         this.resetPiecePosition(piece);
@@ -2668,12 +3326,40 @@ Board.prototype.clearPremoveStack = function () {
   $(".promotion-piece-popover").remove();
   $("#game").removeClass("premove-active");
   $("#board td").removeClass("premove-trail premove-origin premove-destination premove-current-piece premove-occupied-destination");
-  $("#board i").removeClass("premove-own-piece premove-ghost-piece premove-faded-piece premove-capture-top").css({ top: "0px", left: "0px", zIndex: "" });
+  $("#board i").each(function () {
+    const element = $(this);
+    element
+      .removeClass("premove-own-piece premove-ghost-piece premove-faded-piece premove-capture-top premove-unavailable-piece")
+      .css({ zIndex: "" });
+    if (!element.hasClass("ui-draggable-dragging")) {
+      element.css({ top: "0px", left: "0px" });
+    }
+  });
 };
 
 Board.prototype.renderPremoveVisuals = function () {
+  const boardRef = this;
   $("#board td").removeClass("premove-trail premove-origin premove-destination premove-current-piece premove-occupied-destination");
-  $("#board i").removeClass("premove-own-piece premove-ghost-piece premove-faded-piece premove-capture-top").css({ top: "0px", left: "0px", zIndex: "" });
+  $("#board i").each(function () {
+    const element = $(this);
+    if (element.hasClass("ui-draggable-dragging")) return;
+    const elementPiece = element.data("piece");
+    const elementKey = elementPiece && elementPiece.premoveId ? elementPiece.premoveId : "";
+    const hasQueuedVisualPosition = !!(
+      elementKey &&
+      boardRef.premoveVisualPositions &&
+      boardRef.premoveVisualPositions.has(elementKey)
+    );
+    element
+      .removeClass("premove-own-piece premove-ghost-piece premove-faded-piece premove-capture-top premove-unavailable-piece")
+      .css({ zIndex: "" });
+    // A just-dropped helper is still offset from its authoritative parent.
+    // Resetting it here exposes the origin before it is moved into its visual
+    // premove square, producing an origin -> destination flash.
+    if (!hasQueuedVisualPosition) {
+      element.css({ top: "0px", left: "0px" });
+    }
+  });
 
   if (!this.premoveStack || !this.premoveStack.length) {
     $("#game").removeClass("premove-active");
@@ -2683,38 +3369,97 @@ Board.prototype.renderPremoveVisuals = function () {
   $("#game").addClass("premove-active");
   const playAs = window.playAs || this.playAs;
 
-  for (const item of this.premoveStack) {
+  for (let itemIndex = 0; itemIndex < this.premoveStack.length; itemIndex++) {
+    const item = this.premoveStack[itemIndex];
     this.getSquare(item.fromX, item.fromY).addClass("premove-trail premove-origin");
     const destinationX = item.visualToX || item.toX;
     const destinationY = item.visualToY || item.toY;
     const destinationSquare = this.getSquare(destinationX, destinationY).addClass("premove-trail premove-destination");
-    const occupant = this.pieceAtSquare(destinationX, destinationY);
+    const itemPiece = this.pieces.find((piece) => piece && piece.premoveId == item.key);
+    const occupant = this.getPremoveOccupantBeforeItem(itemIndex, destinationX, destinationY, itemPiece);
     if (occupant && occupant.element && occupant.premoveId != item.key) {
       destinationSquare.addClass("premove-occupied-destination");
       $(occupant.element).addClass("premove-faded-piece");
+    }
+    if (item.isCastling && this.isInsideBoard(item.rookFromX, item.rookFromY) && this.isInsideBoard(item.rookToX, item.rookToY)) {
+      this.getSquare(item.rookFromX, item.rookFromY).addClass("premove-trail premove-origin");
+      this.getSquare(item.rookToX, item.rookToY).addClass("premove-trail premove-destination");
+      const stateBeforeCastle = this.buildPremoveVirtualState(itemIndex);
+      for (const clearedKey of item.castlingClearedKeys || []) {
+        const clearedPiece = this.pieces.find((piece) => piece && piece.premoveId == clearedKey);
+        const clearedPosition = clearedPiece ? stateBeforeCastle.positions.get(clearedPiece) : null;
+        if (!clearedPiece || !clearedPosition) continue;
+        this.getSquare(clearedPosition.x, clearedPosition.y).addClass("premove-occupied-destination");
+        $(clearedPiece.element).addClass("premove-faded-piece premove-unavailable-piece");
+      }
+    }
+  }
+
+  const finalVirtualState = this.buildPremoveVirtualState();
+  for (const piece of this.pieces) {
+    if (piece && piece.element && !finalVirtualState.positions.has(piece)) {
+      $(piece.element).addClass("premove-faded-piece premove-unavailable-piece");
     }
   }
 
   for (const piece of this.pieces) {
     if (!piece || piece.color != playAs || !piece.element) continue;
+    if ($(piece.element).hasClass("ui-draggable-dragging")) continue;
+    if (!finalVirtualState.positions.has(piece)) continue;
     const key = this.getPremovePieceKey(piece);
     const visual = this.premoveVisualPositions.get(key);
     const square = visual ? this.getSquare(visual.x, visual.y) : this.getSquare(piece.x, piece.y);
     $(piece.element).addClass("premove-own-piece");
     square.addClass("premove-current-piece");
     if (visual) {
-      const occupyingPiece = this.pieceAtSquare(visual.x, visual.y);
-      const isCaptureVisual = occupyingPiece && occupyingPiece != piece && occupyingPiece.color != piece.color;
-      $(piece.element)
-        .stop(true, true)
+      let lastPieceMoveIndex = -1;
+      for (let itemIndex = this.premoveStack.length - 1; itemIndex >= 0; itemIndex--) {
+        if (this.premoveStack[itemIndex] && this.premoveStack[itemIndex].key == key) {
+          lastPieceMoveIndex = itemIndex;
+          break;
+        }
+      }
+      const occupyingPiece = lastPieceMoveIndex >= 0
+        ? this.getPremoveOccupantBeforeItem(lastPieceMoveIndex, visual.x, visual.y, piece)
+        : null;
+      const isCaptureVisual = occupyingPiece && occupyingPiece != piece;
+      const pieceElement = $(piece.element);
+      const pieceElementNode = pieceElement[0];
+      if (pieceElementNode && !$.contains(square[0], pieceElementNode)) {
+        pieceElement.detach().appendTo(square);
+      }
+      pieceElement
         .css({ top: "0px", left: "0px", transition: "none", transform: "none" })
-        .detach()
-        .appendTo(square)
         .addClass("premove-ghost-piece")
         .toggleClass("premove-capture-top", !!isCaptureVisual)
         .css("zIndex", isCaptureVisual ? 80 : "");
     }
   }
+};
+
+Board.prototype.commitDraggedPremoveVisual = function (piece, x, y) {
+  if (!piece || !piece.element || !this.isInsideBoard(x, y)) return false;
+
+  const destinationSquare = this.getSquare(x, y);
+  const pieceElement = $(piece.element);
+  if (!destinationSquare.length || !pieceElement.length) return false;
+
+  // The helper is visually over the destination but is still positioned as
+  // an offset from its origin square. Move the node first and only then clear
+  // that offset, so the origin is never exposed during premove finalization.
+  pieceElement
+    .detach()
+    .appendTo(destinationSquare)
+    .css({ top: "0px", left: "0px", transition: "none", transform: "none" })
+    .addClass("premove-own-piece premove-ghost-piece");
+
+  const isCaptureVisual = destinationSquare.hasClass("premove-occupied-destination");
+  pieceElement
+    .toggleClass("premove-capture-top", isCaptureVisual)
+    .css("zIndex", isCaptureVisual ? 80 : "");
+  destinationSquare.addClass("premove-current-piece");
+  piece.premoveVisualCommittedDuringDrop = true;
+  return true;
 };
 
 Board.prototype.getPremovePieceKey = function (piece) {
@@ -2734,6 +3479,12 @@ Board.prototype.rebuildPremoveVisualPositionsFromStack = function () {
       x: item.visualToX || item.toX,
       y: item.visualToY || item.toY,
     });
+    if (item.isCastling && item.rookKey) {
+      visualPositions.set(item.rookKey, {
+        x: item.rookToX,
+        y: item.rookToY,
+      });
+    }
   }
 
   this.premoveVisualPositions = visualPositions;
@@ -2749,26 +3500,95 @@ Board.prototype.queuePremove = function (piece, x, y) {
 
   const key = this.getPremovePieceKey(piece);
   const visualFrom = this.premoveVisualPositions.get(key) || { x: piece.x, y: piece.y };
-  const occupiedByVisualPiece = Array.from(this.premoveVisualPositions.entries()).some(function (entry) {
-    return entry[0] != key && entry[1].x == x && entry[1].y == y;
-  });
-  if (occupiedByVisualPiece || !this.isPremoveShapeLegal(piece, visualFrom.x, visualFrom.y, x, y)) {
+  const virtualPieceType = this.getPremoveVirtualPieceType(piece);
+  const visualOccupant = this.getPremoveVisualOccupant(x, y, piece);
+  const isCastlingTarget = virtualPieceType == "King" && visualFrom.x == x && visualFrom.y == 5 &&
+    visualOccupant && visualOccupant.color == piece.color && visualOccupant.constructor.name == "Rook" &&
+    (y == 1 || y == 8);
+  const isCastlingDestination = virtualPieceType == "King" && visualFrom.y == 5 &&
+    visualFrom.x == x && Math.abs(y - visualFrom.y) == 2;
+  const isCastlingAttempt = isCastlingTarget || isCastlingDestination;
+  const castleRookY = isCastlingAttempt ? (y > visualFrom.y ? 8 : 1) : null;
+  const castleRook = isCastlingAttempt
+    ? this.getPremoveVisualOccupant(visualFrom.x, castleRookY, piece)
+    : null;
+  const hasCastlingRook = castleRook && castleRook.color == piece.color &&
+    castleRook.constructor.name == "Rook";
+  const castlingClearedPieces = [];
+  if (isCastlingAttempt && hasCastlingRook) {
+    const stateBeforeCastle = this.buildPremoveVirtualState();
+    const corridorStart = Math.min(visualFrom.y, castleRookY);
+    const corridorEnd = Math.max(visualFrom.y, castleRookY);
+    for (const entry of stateBeforeCastle.positions.entries()) {
+      const corridorPiece = entry[0];
+      const position = entry[1];
+      if (
+        corridorPiece != piece &&
+        corridorPiece != castleRook &&
+        position.x == visualFrom.x &&
+        position.y > corridorStart &&
+        position.y < corridorEnd
+      ) {
+        castlingClearedPieces.push(corridorPiece);
+      }
+    }
+  }
+  const isBlockedPawnPush = virtualPieceType == "Pawn" && visualFrom.y == y && !!visualOccupant;
+  if (
+    (isCastlingAttempt && !hasCastlingRook) ||
+    isBlockedPawnPush ||
+    !this.isPremoveShapeLegal(piece, visualFrom.x, visualFrom.y, x, y, virtualPieceType)
+  ) {
     this.resetPiecePosition(piece);
     this.renderPremoveVisuals();
     return false;
   }
 
-  const reachesPromotionRank = piece.constructor.name == "Pawn" && ((piece.color == "white" && x == 1) || (piece.color == "black" && x == 8));
-  const isCastlingDestination = piece.constructor.name == "King" && visualFrom.y == 5 && visualFrom.x == x && Math.abs(y - visualFrom.y) == 2;
-  const executeToY = isCastlingDestination ? (y > visualFrom.y ? 8 : 1) : y;
+  const reachesPromotionRank = virtualPieceType == "Pawn" && ((piece.color == "white" && x == 1) || (piece.color == "black" && x == 8));
+  const visualDestination = isCastlingAttempt
+    ? { x: visualFrom.x, y: castleRookY == 8 ? 7 : 3 }
+    : { x: x, y: y };
 
   const enqueue = (promotion) => {
-    this.premoveStack.push({ key: key, fromX: visualFrom.x, fromY: visualFrom.y, toX: executeToY == y ? x : visualFrom.x, toY: executeToY, visualToX: x, visualToY: y, promotion: promotion || null });
-    this.premoveVisualPositions.set(key, { x: x, y: y });
+    const item = {
+      key: key,
+      fromX: visualFrom.x,
+      fromY: visualFrom.y,
+      toX: isCastlingAttempt ? visualFrom.x : x,
+      toY: isCastlingAttempt ? castleRookY : y,
+      visualToX: visualDestination.x,
+      visualToY: visualDestination.y,
+      promotion: promotion || null,
+    };
+    if (isCastlingAttempt) {
+      item.isCastling = true;
+      item.rookKey = this.getPremovePieceKey(castleRook);
+      item.rookFromX = visualFrom.x;
+      item.rookFromY = castleRookY;
+      item.rookToX = visualFrom.x;
+      item.rookToY = castleRookY == 8 ? 6 : 4;
+      item.castlingClearedKeys = castlingClearedPieces.map((corridorPiece) =>
+        this.getPremovePieceKey(corridorPiece)
+      );
+    }
+    this.premoveStack.push(item);
+    this.premoveVisualPositions.set(key, visualDestination);
+    if (item.isCastling) {
+      this.premoveVisualPositions.set(item.rookKey, { x: item.rookToX, y: item.rookToY });
+    }
     if (promotion) {
       this.setPremovePiecePreview(piece, promotion);
     }
+    // Premoves are state previews, not played moves. Render the future square
+    // directly; animating from the origin creates a visible origin -> target
+    // round-trip, especially after drag/click release cleanup.
     this.renderPremoveVisuals();
+    if ($(piece.element).hasClass("ui-draggable-dragging")) {
+      this.commitDraggedPremoveVisual(piece, visualDestination.x, visualDestination.y);
+    }
+    if (item.isCastling) {
+      this.updateDraggables(true);
+    }
   };
 
   if (reachesPromotionRank) {
@@ -2804,9 +3624,10 @@ Board.prototype.tryExecutePremoveStack = function () {
 
   const next = this.premoveStack[0];
   if (!this.canExecutePremove(next)) {
-    this.isExecutingPremoveStack = false;
-    this.rebuildPremoveVisualPositionsFromStack();
-    this.renderPremoveVisuals();
+    // The first pending action no longer exists in the authoritative
+    // position. Every later action depends on that future position, so unwind
+    // the entire transaction instead of leaving the board rendered there.
+    this.clearPremoveStack();
     if (window.gameState == "playing") {
       this.updateDraggables(true);
     }
@@ -2814,10 +3635,6 @@ Board.prototype.tryExecutePremoveStack = function () {
   }
 
   const piece = this.pieces.find((p) => p && this.getPremovePieceKey(p) == next.key);
-  if (piece && piece.element) {
-    this.resetPremovePiecePreview(piece);
-  }
-
   const willPromote = next.promotion || (() => {
     const pendingPiece = this.pieces.find((p) => p && this.getPremovePieceKey(p) == next.key);
     return pendingPiece && pendingPiece.constructor.name == "Pawn" &&
@@ -2830,16 +3647,30 @@ Board.prototype.tryExecutePremoveStack = function () {
   // The piece is already rendered at the final square of its premove chain.
   // Execute the authoritative move without visibly replaying it from the
   // current board position.
-  const moved = makeMove(this, next.fromX, next.fromY, next.toX, next.toY, { animate: false });
+  const preserveDraggedElement = !!(
+    piece &&
+    piece.element &&
+    $(piece.element).hasClass("ui-draggable-dragging")
+  );
+  const moved = makeMove(this, next.fromX, next.fromY, next.toX, next.toY, {
+    animate: false,
+    preserveDraggedElement: preserveDraggedElement,
+  });
   if (willPromote && !moved) {
     window.lastUpgradedPiece = false;
     if (piece) this.resetPremovePiecePreview(piece);
   }
 
-  if (moved) {
-    this.premoveStack.shift();
-    this.rebuildPremoveVisualPositionsFromStack();
+  if (!moved) {
+    this.clearPremoveStack();
+    if (window.gameState == "playing") {
+      this.updateDraggables(true);
+    }
+    return false;
   }
+
+  this.premoveStack.shift();
+  this.rebuildPremoveVisualPositionsFromStack();
 
   if (!this.premoveStack.length) {
     this.clearPremoveStack();
@@ -2858,11 +3689,14 @@ Board.prototype.updateDraggables = function () {
 
   const applyDraggableState = () => {
     this.draggableUpdateTimer = null;
-    this.disableDraggables($("i"));
-
     const activeColor = this.getActiveDraggableColor();
-    if (activeColor) {
-      this.enableDraggables($(`.fg-${activeColor}`));
+    for (const piece of this.pieces || []) {
+      if (!piece || !piece.element) continue;
+      if (activeColor && piece.color == activeColor && this.isPremovePieceAvailable(piece)) {
+        this.enableDraggables($(piece.element));
+      } else {
+        this.disableDraggables($(piece.element));
+      }
     }
   };
 
@@ -2938,7 +3772,16 @@ Board.prototype.alterTurns = function () {
 };
 Board.prototype.moveTo = function (piece, square) {
   const moveOptions = arguments[2] || {};
+  if (
+    typeof this.hasThinkingHelpers == "function" &&
+    this.hasThinkingHelpers() &&
+    typeof this.clearThinkingHelpers == "function"
+  ) {
+    this.clearThinkingHelpers();
+  }
   const shouldAnimate = moveOptions.animate === true;
+  const preserveDraggedElement = moveOptions.preserveDraggedElement === true &&
+    $(piece.element).hasClass("ui-draggable-dragging");
   const originSquare = $(piece.element).parent("td");
   const hasAuthoritativeOrigin =
     this.isInsideBoard(moveOptions.fromX, moveOptions.fromY);
@@ -2957,10 +3800,12 @@ Board.prototype.moveTo = function (piece, square) {
       ? square[0].getBoundingClientRect()
       : null;
 
-  $(piece.element).css({
-    top: "0px",
-    left: "0px",
-  });
+  if (!preserveDraggedElement) {
+    $(piece.element).css({
+      top: "0px",
+      left: "0px",
+    });
+  }
   // The DOM may intentionally show this player's future premove position.
   // Captures and castling must therefore use the board model captured before
   // the moving piece's coordinates changed, never the elements in the square.
@@ -3010,11 +3855,14 @@ Board.prototype.moveTo = function (piece, square) {
     piece.firstMoveDone = true;
     oldPiece.firstMoveDone = true;
     
-    let kingEl = $(piece.element).detach();
-    kingEl.css({
-      top: "0px",
-      left: "0px",
-    });
+    let kingEl = $(piece.element);
+    if (!preserveDraggedElement) {
+      kingEl = kingEl.detach();
+      kingEl.css({
+        top: "0px",
+        left: "0px",
+      });
+    }
     piece.element = kingEl[0];
     
     let rookEl = $(oldPiece.element).detach();
@@ -3024,13 +3872,17 @@ Board.prototype.moveTo = function (piece, square) {
     });
     oldPiece.element = rookEl[0];
     
-    this.getSquare(piece.x, piece.y).append(kingEl);
+    if (!preserveDraggedElement) {
+      this.getSquare(piece.x, piece.y).append(kingEl);
+    }
     this.getSquare(oldPiece.x, oldPiece.y).append(rookEl);
     if (shouldAnimate) {
       const kingTargetRect = this.getSquare(piece.x, piece.y)[0].getBoundingClientRect();
       const rookTargetRect = this.getSquare(oldPiece.x, oldPiece.y)[0].getBoundingClientRect();
 
-      animatePieceTranslation(piece.element, originRect, kingTargetRect, kingEl);
+      if (!preserveDraggedElement) {
+        animatePieceTranslation(piece.element, originRect, kingTargetRect, kingEl);
+      }
       animatePieceTranslation(oldPiece.element, rookOriginRect, rookTargetRect, rookEl);
     }
     this.highlightMoveSquares([
@@ -3068,12 +3920,17 @@ Board.prototype.moveTo = function (piece, square) {
       }
     }
 
-    let a = $(piece.element).detach();
+    let a = $(piece.element);
+    if (!preserveDraggedElement) {
+      a = a.detach();
+    }
     piece.element = a[0];
 
     piece.recalculateAttackingSquares(this);
-    $(square).append(a);
-    if (shouldAnimate) {
+    if (!preserveDraggedElement) {
+      $(square).append(a);
+    }
+    if (shouldAnimate && !preserveDraggedElement) {
       animatePieceTranslation(a[0], originRect, destinationRect, a);
     }
     this.highlightMoveSquares([
@@ -3097,5 +3954,10 @@ Board.prototype.moveTo = function (piece, square) {
 };
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { Board, getAuthoritativeMoveTarget };
+  module.exports = {
+    Board,
+    centerDraggableOnPointer,
+    getAuthoritativeMoveTarget,
+    getAutomaticPromotionChoice,
+  };
 }
